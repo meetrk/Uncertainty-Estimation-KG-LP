@@ -1,0 +1,11 @@
+# Core dependencies
+torch>=1.9.0
+torch-geometric>=2.0.0
+numpy>=1.20.0
+PyYAML>=5.4.0
+
+# Development dependencies
+pytest>=6.0.0
+black>=21.0.0
+flake8>=3.8.0
+mypy>=0.900

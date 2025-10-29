@@ -1,0 +1,6 @@
+dataset:
+  name: WN18RR
+  path: ./dataset/wn18rr
+
+
+
