@@ -1,3 +1,18 @@
 dataset:
   name: FB15k-237
   path: ./dataset/fb15k237
+
+
+model:
+  encoder:
+    type: RGCN
+    hidden_layer_size: 200
+    embedding_dim: 200
+    num_layers: 2
+    dropout: 0.2
+    num_bases : 30
+  decoder:
+    type: DistMult
+    w_init: xavier_uniform
+    w_gain: true
+    b_init: true
