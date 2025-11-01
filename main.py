@@ -3,8 +3,10 @@ import logging
 import sys
 from pathlib import Path
 from utils.config_loader import ConfigLoader
-from utils.dataset_loader import load_dataset, generate_data
-
+from utils.utils import setup_and_load_dataset
+from model.encoder.model import RGCN
+from model.decoder.distmult import DistMultDecoder
+import torch
 
 def setup_logging(log_level: str = "INFO") -> None:
     """Setup logging configuration."""
@@ -62,22 +64,59 @@ def main():
         config_loader = ConfigLoader(str(config_path))
         dataset_config = config_loader.get_section('dataset')  
 
-        # Load dataset
-        logger.info("Loading dataset...")
-        dataset = load_dataset(dataset_config)
+        # Load dataset and generate a PyG data object
+        data = setup_and_load_dataset(dataset_config, logger)
         
-        # Generate PyTorch Geometric data
-        logger.info("Generating graph data...")
-        data = generate_data(*dataset)
+        # Determine number of nodes
+        if hasattr(data, 'num_nodes') and data.num_nodes is not None:
+            num_nodes = data.num_nodes
+        elif hasattr(data, 'edge_index') and data.edge_index is not None:
+            num_nodes = data.edge_index.max().item() + 1
+        else:
+            raise ValueError("Cannot determine number of nodes from data")
         
-        logger.info(f"Graph data created with {data.num_nodes} nodes")
-        if hasattr(data, 'edge_index') and data.edge_index is not None:
-            logger.info(f"Number of edges: {data.edge_index.shape[1]}")
-        if hasattr(data, 'edge_type') and data.edge_type is not None:
-            logger.info(f"Number of relation types: {data.edge_type.max().item() + 1}")
+        # model = LinkPredictor(config_loader.get_section('model'), data, logger)
+
+        decoder = DistMultDecoder(
+            num_relations=data.num_relations,
+            embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
+            num_nodes=num_nodes,
+            num_rel=data.num_relations,
+            w_init=config_loader.get_section('model')['decoder']['w_init'],
+            w_gain=config_loader.get_section('model')['decoder']['w_gain'],
+            b_init=config_loader.get_section('model')['decoder']['b_init'],
+        )
+
+        # Create entity indices (all entities in the graph)
+        entity_indices = torch.arange(num_nodes, dtype=torch.long)
+    
+        # Initialize the RGCN model
+        model = RGCN(
+            num_entities=num_nodes,
+            num_relations=data.num_relations,
+            embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
+            num_bases=config_loader.get_section('model')['encoder']['num_bases'],
+            dropout=config_loader.get_section('model')['encoder']['dropout'],
+            hidden_layer_size=config_loader.get_section('model')['encoder']['hidden_layer_size'],
+            decoder=decoder
+        )
         
-        # TODO: Add model training and evaluation here
-        logger.info("Dataset loading completed successfully!")
+        logger.info(f"Model architecture:\n{model}")
+
+        # Forward pass through the encoder
+        logger.info("Running forward pass...")
+        entity_embeddings = model.forward(entity_indices, data.edge_index, data.edge_type)
+        logger.info(f"Entity embeddings shape: {entity_embeddings.shape}")
+        
+        # Example: Score some triplets using the decoder
+        # Take first 10 training triplets as example
+        if hasattr(data, 'train_triplets') and len(data.train_triplets) > 0:
+            sample_triplets = data.train_triplets[:10]
+            scores = model.decoder(entity_embeddings, sample_triplets)
+            logger.info(f"Sample triplet scores: {scores}")
+        
+        logger.info("Forward pass completed successfully!")
+
         
     except FileNotFoundError as e:
         logger.error(f"File not found: {e}")
