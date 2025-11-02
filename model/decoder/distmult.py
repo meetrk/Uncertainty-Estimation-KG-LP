@@ -41,7 +41,6 @@ class DistMultDecoder(Decoder):
     def __init__(self, num_relations,
                 embedding_dim,
                 num_nodes,
-                num_rel,
                 w_init='standard-normal',
                 w_gain=False,
                 b_init=True,
@@ -52,11 +51,11 @@ class DistMultDecoder(Decoder):
         self.b_init = b_init
 
         # Create weights & biases
-        self.relations_embedding = nn.Parameter(torch.FloatTensor(num_rel, embedding_dim))
+        self.relations_embedding = nn.Parameter(torch.FloatTensor(num_relations, embedding_dim))
         if b_init:
             self.sbias = Parameter(torch.FloatTensor(num_nodes))
             self.obias = Parameter(torch.FloatTensor(num_nodes))
-            self.pbias = Parameter(torch.FloatTensor(num_rel))
+            self.pbias = Parameter(torch.FloatTensor(num_relations))
         else:
             self.register_parameter('sbias', None)
             self.register_parameter('obias', None)

@@ -39,7 +39,7 @@ class RGCN(nn.Module):
         
         # Decoder (modular component)
         if decoder is None:
-            self.decoder = DistMultDecoder(num_relations, embedding_dim, num_entities, num_relations)
+            self.decoder = DistMultDecoder(num_relations, embedding_dim, num_entities)
         else:
             self.decoder = decoder
     
