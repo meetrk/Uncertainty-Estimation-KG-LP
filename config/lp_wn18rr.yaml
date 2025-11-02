@@ -2,5 +2,27 @@ dataset:
   name: WN18RR
   path: ./dataset/wn18rr
 
-
-
+model:
+  encoder:
+    type: RGCN
+    hidden_layer_size: 200
+    embedding_dim: 200
+    num_layers: 2
+    dropout: 0.2
+    num_bases : 4
+  decoder:
+    type: DistMult
+    w_init: xavier_uniform
+    w_gain: true
+    b_init: true
+  
+training:
+  epochs: 2
+  sampling:
+    batch_size: 1024
+    negative_sampling_ratio: 5
+  optimiser:
+    learning_rate: 0.01
+    weight_decay: 0.0001
+  evaluation_frequency: 1
+  save_frequency: 1

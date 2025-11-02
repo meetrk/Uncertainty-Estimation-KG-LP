@@ -16,3 +16,12 @@ model:
     w_init: xavier_uniform
     w_gain: true
     b_init: true
+  
+training:
+  epochs: 100
+  batch_size: 1024
+  learning_rate: 0.01
+  weight_decay: 0.0001
+  negative_sampling_ratio: 10
+  evaluation_frequency: 10
+  save_frequency: 20
