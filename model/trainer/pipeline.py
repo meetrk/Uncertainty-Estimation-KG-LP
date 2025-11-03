@@ -4,10 +4,12 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
-import time
-from torch_geometric.loader import LinkNeighborLoader, LinkLoader
+from torch_geometric.loader import NeighborSampler, LinkLoader
 from torch_geometric.sampler import NegativeSampling
-import tqdm
+from random import sample
+from utils.evaluation import mean_reciprocal_rank, hits_at_k
+from utils.utils import get_triples,negative_sampling
+from tqdm import tqdm
 
 class Pipeline:
 
@@ -35,47 +37,39 @@ class Pipeline:
         eval_frequency = self.config.get('evaluation_frequency', 10)
         save_frequency = self.config.get('save_frequency', 20)
         
-        loader = LinkNeighborLoader(
-            self.data,
-            num_neighbors=[30] * 2,
-            batch_size=self.config['sampling']['batch_size'],
-            edge_label_index=self.data.edge_index,
-            neg_sampling=NegativeSampling(
-                mode='binary',
-                amount=self.config['sampling']['negative_sampling_ratio'],
-            ),
-            shuffle=True
-        )
+    
 
         self.logger.info(f"Starting training for {max_epochs} epochs")
         
-        for epoch in range(1, max_epochs + 1):
+        tqdm_range = range(1, max_epochs + 1)
+        tqdm_range = tqdm(tqdm_range, desc="Evaluating", unit="batch")
+
+        for epoch in tqdm_range:
             self.epoch = epoch
             
             # Training
             epoch_loss = 0.0
-            num_batches = 0
-            
-            tqdm_loader = tqdm.tqdm(loader, desc=f"Epoch {epoch}")
-            
-            for batch_idx, batch_data in enumerate(tqdm_loader):
-                loss = self.train(batch_data)
-                epoch_loss += loss
-                num_batches += 1
-                
-                tqdm_loader.set_postfix({'loss': f'{loss:.4f}'})
-            
-            avg_loss = epoch_loss / num_batches
-            self.training_history['train_loss'].append(avg_loss)
-            
-            self.logger.info(f"Epoch {epoch} completed. Average loss: {avg_loss:.4f}")
-            
+            positives = sample(range(self.data.train_triplets.size(0)), k=self.config['sampling']['batch_size'])
+            positives = self.data.train_triplets[positives].to(self.device)
+            negatives = positives.clone()[:, None, :].expand(self.config['sampling']['batch_size'], self.config['sampling']['negative_sampling_ratio'], 3).contiguous()
+            negatives = negative_sampling(negatives, self.data.num_nodes, self.config['sampling']['head_corrupt_prob'], device=self.device)
+            batch_idx = torch.cat([positives, negatives], dim=0)
+
+            loss = self.train(
+                edge_label_index=batch_idx[:, :2].T,
+                edge_label_type=batch_idx[:, 1],
+                edge_label=torch.cat([torch.ones(positives.size(0), device=self.device), 
+                                      torch.zeros(negatives.size(0), device=self.device)])
+            )
+            epoch_loss += loss.item()
+            self.training_history['train_loss'].append(epoch_loss)
+            self.logger.info(f"Epoch {epoch} completed. Average loss: {epoch_loss:.4f}")
+
             # Evaluation
             if epoch % eval_frequency == 0:
                 eval_metrics = self.evaluate(self.data)
                 self.training_history['eval_metrics'].append(eval_metrics)
-                self.logger.info(f"Evaluation - Accuracy: {eval_metrics['accuracy']:.4f}, "
-                               f"Loss: {eval_metrics['loss']:.4f}")
+                self.logger.info(f"Evaluation metrics at epoch {epoch}: {eval_metrics}")
             
             # Save checkpoint
             if epoch % save_frequency == 0:
@@ -84,58 +78,35 @@ class Pipeline:
         self.logger.info("Training completed!")
         return self.training_history
 
-    def train(self, batch_data):
+    def train(self, edge_label_index, edge_label_type, edge_label):
+        """
+        Train the model on a single batch.
+        """
+
         self.model.train()
         self.optimizer.zero_grad()
         
         # Move data to device
-        batch_data = batch_data.to(self.device)
-        
-        # Get entity indices for the batch
-        # For knowledge graphs, we typically use all entities
-        if hasattr(batch_data, 'n_id'):
-            entity_indices = batch_data.n_id
-        else:
-            # Fallback: use all entities in the subgraph
-            max_node = max(batch_data.edge_index.max(), batch_data.edge_label_index.max())
-            entity_indices = torch.arange(max_node + 1, device=self.device)
-        
-        # Forward pass through encoder
-        entity_embeddings = self.model(entity_indices, batch_data.edge_index, batch_data.edge_type)
-        
-        # Create triplets from edge_label_index
-        if batch_data.edge_label_index.size(0) == 2:
-            # Convert edge format to triplet format
-            heads = batch_data.edge_label_index[0]
-            tails = batch_data.edge_label_index[1]
-            # Assume relation type 0 for simplicity, or extract from batch_data if available
-            if hasattr(batch_data, 'edge_label_type'):
-                relations = batch_data.edge_label_type
-            else:
-                relations = torch.zeros_like(heads)  # Default relation
-            
-            triplets = torch.stack([heads, relations, tails], dim=1)
-        else:
-            triplets = batch_data.edge_label_index.t()
-        
+        edge_label_index = edge_label_index.to(self.device)
+        edge_label_type = edge_label_type.to(self.device)
+        edge_label = edge_label.to(self.device)
+
+        entities = torch.arange(self.data.num_nodes, device=self.device)
+        entity_embeddings = self.model(entities, edge_label_index, edge_label_type) ## generating embedding only for nodes in the batch
+
+        triplets = get_triples(edge_label_index, edge_label_type)
         # Compute loss
-        if hasattr(batch_data, 'edge_label'):
-            targets = batch_data.edge_label.float()
-        else:
-            # Create binary targets: 1 for positive edges, 0 for negative
-            targets = torch.ones(triplets.size(0), device=self.device)
-        
-        loss = self.model.score_loss(entity_embeddings, triplets, targets)
-        
+        loss = self.model.score_loss(entity_embeddings, triplets, edge_label.float()) ## calculate the loss
+
         # Backward pass
         loss.backward()
-        
+
         # Gradient clipping
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        
+
         self.optimizer.step()
         
-        return loss.item()
+        return loss
 
     def evaluate(self, data):
         """
@@ -148,75 +119,89 @@ class Pipeline:
             Dictionary with evaluation metrics
         """
         self.model.eval()
-        
         with torch.no_grad():
-            # Move data to device
-            data = data.to(self.device)
+            self.logger.info("Starting evaluation...")
             
-            # Get all entity indices
-            if hasattr(data, 'num_nodes'):
-                num_nodes = data.num_nodes
-            else:
-                num_nodes = data.edge_index.max().item() + 1
+            # Use test triplets for evaluation
+            test_triplets = data.test_triplets.to(self.device)
+            all_triplets = data.all_triplets.to(self.device)
             
-            entity_indices = torch.arange(num_nodes, device=self.device)
+            # Get all entities and generate embeddings using the full graph
+            entities = torch.arange(data.num_nodes, device=self.device)
+            entity_embeddings = self.model(entities, data.edge_index.to(self.device), data.edge_type.to(self.device))
             
-            # Forward pass through the model
-            entity_embeddings = self.model(entity_indices, data.edge_index, data.edge_type)
+            # Evaluate in batches to avoid memory issues
+            batch_size = self.config['evaluation']['batch_size']
+            num_test = test_triplets.size(0)
+            all_ranks = []
+
+            tqdm_range = range(0, num_test, batch_size)
+            if self.config.get('evaluation', {}).get('verbose', False):
+                
+                tqdm_range = tqdm(tqdm_range, desc="Evaluating", unit="batch")
+
+            for i in tqdm_range:
+                batch_end = min(i + batch_size, num_test)
+                batch_triplets = test_triplets[i:batch_end]
+                
+                # For each test triplet, compute ranks for head and tail prediction
+                for triplet in batch_triplets:
+                    h, r, t = triplet[0].item(), triplet[1].item(), triplet[2].item()
+                    
+                    # Head prediction: corrupt head, keep relation and tail fixed
+                    head_scores = []
+                    for candidate_h in range(data.num_nodes):
+                        candidate_triplet = torch.tensor([[candidate_h, r, t]], device=self.device)
+                        score = self.model.decoder(entity_embeddings, candidate_triplet)
+                        head_scores.append(score.item())
+                    
+                    head_scores = torch.tensor(head_scores, device=self.device)
+                    
+                    # Filter out known true triplets (except the target)
+                    for known_triplet in all_triplets:
+                        kh, kr, kt = known_triplet[0].item(), known_triplet[1].item(), known_triplet[2].item()
+                        if kr == r and kt == t and kh != h:
+                            head_scores[kh] = float('-inf')
+                    
+                    # Calculate rank for head prediction
+                    target_score = head_scores[h]
+                    head_rank = (head_scores >= target_score).sum().item()
+                    all_ranks.append(head_rank)
+                    
+                    # Tail prediction: corrupt tail, keep head and relation fixed
+                    tail_scores = []
+                    for candidate_t in range(data.num_nodes):
+                        candidate_triplet = torch.tensor([[h, r, candidate_t]], device=self.device)
+                        score = self.model.decoder(entity_embeddings, candidate_triplet)
+                        tail_scores.append(score.item())
+                    
+                    tail_scores = torch.tensor(tail_scores, device=self.device)
+                    
+                    # Filter out known true triplets (except the target)
+                    for known_triplet in all_triplets:
+                        kh, kr, kt = known_triplet[0].item(), known_triplet[1].item(), known_triplet[2].item()
+                        if kh == h and kr == r and kt != t:
+                            tail_scores[kt] = float('-inf')
+                    
+                    # Calculate rank for tail prediction
+                    target_score = tail_scores[t]
+                    tail_rank = (tail_scores >= target_score).sum().item()
+                    all_ranks.append(tail_rank)
             
-            # Use test triplets if available, otherwise use a subset of training data
-            if hasattr(data, 'test_triplets') and data.test_triplets is not None:
-                test_triplets = data.test_triplets[:1000]  # Limit for memory
-                targets = torch.ones(len(test_triplets), device=self.device)
-            elif hasattr(data, 'edge_label_index') and hasattr(data, 'edge_label'):
-                # Use provided evaluation edges
-                heads = data.edge_label_index[0]
-                tails = data.edge_label_index[1]
-                relations = torch.zeros_like(heads)  # Default relation
-                test_triplets = torch.stack([heads, relations, tails], dim=1)
-                targets = data.edge_label.float()
-            else:
-                # Fallback: create some test triplets from existing edges
-                edge_sample = data.edge_index[:, :min(1000, data.edge_index.size(1))]
-                test_triplets = torch.stack([
-                    edge_sample[0], 
-                    torch.zeros_like(edge_sample[0]), 
-                    edge_sample[1]
-                ], dim=1)
-                targets = torch.ones(test_triplets.size(0), device=self.device)
+            # Calculate metrics
+            mrr = mean_reciprocal_rank(all_ranks)
+            hits_1 = hits_at_k(all_ranks, 1)
+            hits_3 = hits_at_k(all_ranks, 3)
+            hits_10 = hits_at_k(all_ranks, 10)
             
-            # Score the triplets using the decoder
-            scores = self.model.decoder(entity_embeddings, test_triplets)
-            
-            # Convert scores to predictions (sigmoid + threshold)
-            predictions = torch.sigmoid(scores) > 0.5
-            
-            # Calculate accuracy
-            correct = (predictions.squeeze() == targets).float()
-            accuracy = correct.mean().item()
-            
-            # Calculate AUC if possible
-            try:
-                from sklearn.metrics import roc_auc_score
-                scores_np = torch.sigmoid(scores).cpu().numpy()
-                targets_np = targets.cpu().numpy()
-                auc = roc_auc_score(targets_np, scores_np)
-            except (ImportError, ValueError):
-                auc = None
-            
-            # Calculate loss
-            loss = F.binary_cross_entropy_with_logits(scores.squeeze(), targets)
-            
-            metrics = {
-                'accuracy': accuracy,
-                'loss': loss.item(),
-                'num_samples': len(targets)
-            }
-            
-            if auc is not None:
-                metrics['auc'] = auc
-        
-        return metrics
+            self.logger.info(f"Evaluation completed. MRR: {mrr:.4f}, Hits@1: {hits_1:.4f}, Hits@3: {hits_3:.4f}, Hits@10: {hits_10:.4f}")
+
+        return {
+            'MRR': mrr,
+            'Hits@1': hits_1,
+            'Hits@3': hits_3,
+            'Hits@10': hits_10
+        }
     
     def save_checkpoint(self, epoch):
         """Save model checkpoint."""

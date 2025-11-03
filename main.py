@@ -53,83 +53,78 @@ def main():
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)
     
-    try:
-        # Validate config file exists
-        config_path = Path(args.config)
-        if not config_path.exists():
-            logger.error(f"Configuration file not found: {config_path}")
-            sys.exit(1)
-        
-        # Initialize config loader with the provided path
-        logger.info(f"Loading configuration from: {config_path}")
-        config_loader = ConfigLoader(str(config_path))
-        dataset_config = config_loader.get_section('dataset') 
-        training_config = config_loader.get_section('training')
-
-        # Load dataset and generate a PyG data object
-        data = setup_and_load_dataset(dataset_config, logger)
-        print(data)
-        
-        # Determine number of nodes
-        if hasattr(data, 'num_nodes') and data.num_nodes is not None:
-            num_nodes = int(data.num_nodes)
-        elif hasattr(data, 'edge_index') and data.edge_index is not None:
-            num_nodes = int(data.edge_index.max().item()) + 1
-        else:
-            raise ValueError("Cannot determine number of nodes from data")
-        
-        logger.info(f"Dataset loaded: {num_nodes} nodes, {data.num_relations} relations")
-
-
-        decoder = DistMultDecoder(
-            num_relations=data.num_relations,
-            embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
-            num_nodes=num_nodes,
-            w_init=config_loader.get_section('model')['decoder']['w_init'],
-            w_gain=config_loader.get_section('model')['decoder']['w_gain'],
-            b_init=config_loader.get_section('model')['decoder']['b_init'],
-        )
+    # try:
+    # Validate config file exists
+    config_path = Path(args.config)
+    if not config_path.exists():
+        logger.error(f"Configuration file not found: {config_path}")
+        sys.exit(1)
     
+    # Initialize config loader with the provided path
+    logger.info(f"Loading configuration from: {config_path}")
+    config_loader = ConfigLoader(str(config_path))
+    dataset_config = config_loader.get_section('dataset') 
+    training_config = config_loader.get_section('training')
+    # Load dataset and generate a PyG data object
+    data = setup_and_load_dataset(dataset_config, logger)
+    print(data)
+    
+    # Determine number of nodes
+    if hasattr(data, 'num_nodes') and data.num_nodes is not None:
+        num_nodes = int(data.num_nodes)
+    elif hasattr(data, 'edge_index') and data.edge_index is not None:
+        num_nodes = int(data.edge_index.max().item()) + 1
+    else:
+        raise ValueError("Cannot determine number of nodes from data")
+    
+    logger.info(f"Dataset loaded: {num_nodes} nodes, {data.num_relations} relations")
+    decoder = DistMultDecoder(
+        num_relations=data.num_relations,
+        embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
+        num_nodes=num_nodes,
+        w_init=config_loader.get_section('model')['decoder']['w_init'],
+        w_gain=config_loader.get_section('model')['decoder']['w_gain'],
+        b_init=config_loader.get_section('model')['decoder']['b_init'],
+    )
         # Initialize the RGCN model
-        model = RGCN(
-            num_entities=num_nodes,
-            num_relations=data.num_relations,
-            embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
-            num_bases=config_loader.get_section('model')['encoder']['num_bases'],
-            dropout=config_loader.get_section('model')['encoder']['dropout'],
-            hidden_layer_size=config_loader.get_section('model')['encoder']['hidden_layer_size'],
-            decoder=decoder
-        )
+    model = RGCN(
+        num_entities=num_nodes,
+        num_relations=data.num_relations,
+        embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
+        num_bases=config_loader.get_section('model')['encoder']['num_bases'],
+        dropout=config_loader.get_section('model')['encoder']['dropout'],
+        hidden_layer_size=config_loader.get_section('model')['encoder']['hidden_layer_size'],
+        decoder=decoder
+    )
+    
+    logger.info(f"Model architecture:\n{model}")
+    
+    # Initialize trainer
+    pipeline = Pipeline(
+        model=model,
+        data=data,
+        config=config_loader.get_section('training'),
+        logger=logger
+    )
+    
+    # Start training
+    logger.info("Starting training process...")
+    training_results = pipeline.start_pipeline()
+    print(training_results)
+    '''
+    logger.info("Training completed successfully!")
+    logger.info(f"Final test loss: {training_results['final_test_loss']:.4f}")
+    '''
         
-        logger.info(f"Model architecture:\n{model}")
-        
-        # Initialize trainer
-        pipeline = Pipeline(
-            model=model,
-            data=data,
-            config=config_loader.get_section('training'),
-            logger=logger
-        )
-        
-        # Start training
-        logger.info("Starting training process...")
-        training_results = pipeline.start_pipeline()
-
-        print(training_results)
-        '''
-        logger.info("Training completed successfully!")
-        logger.info(f"Final test loss: {training_results['final_test_loss']:.4f}")
-        '''
-        
-    except FileNotFoundError as e:
-        logger.error(f"File not found: {e}")
-        sys.exit(1)
-    except KeyError as e:
-        logger.error(f"Configuration error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        sys.exit(1)
+    # except FileNotFoundError as e:
+    #     logger.error(f"File not found: {e}")
+    #     sys.exit(1)
+    # except KeyError as e:
+    #     logger.error(f"Configuration error: {e}")
+    #     sys.exit(1)
+    # except Exception as e:
+    #     logger.error(f"Unexpected error: {e}")
+    #     sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -94,10 +94,14 @@ class DistMultDecoder(Decoder):
         s = embedding[triplets[:, 0]]  # Head entities
         r = self.relations_embedding[triplets[:, 1]]  # Relations
         o = embedding[triplets[:, 2]]  # Tail entities
-        
-        score = torch.sum(s * r * o, dim=1)
-        return score
+        scores = torch.sum(s * r * o, dim=1)
+
+        if self.b_init:
+            scores = scores + (self.sbias[triplets[:, 0]] + self.pbias[triplets[:, 1]] + self.obias[triplets[:, 2]])
+
+        return scores
     
     def regularization_loss(self):
         """L2 regularization on relation embeddings."""
         return torch.mean(self.relations_embedding.pow(2))
+    

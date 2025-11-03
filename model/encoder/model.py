@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import torch
 from model.decoder.distmult import DistMultDecoder
 
+
 class RGCN(nn.Module):
     def __init__(self, num_entities, hidden_layer_size, num_relations, num_bases, dropout, 
                  embedding_dim=100, decoder=None):
@@ -61,7 +62,7 @@ class RGCN(nn.Module):
         x = self.conv2(x, edge_index, edge_type)
         
         return x
-    
+
     def score_loss(self, embedding, triplets, target):
         """
         Compute prediction loss using the decoder.

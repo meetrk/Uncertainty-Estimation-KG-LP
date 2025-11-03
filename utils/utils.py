@@ -1,4 +1,5 @@
 from utils.dataset_loader import load_dataset, generate_data
+import torch
 
 def setup_and_load_dataset(dataset_config, logger):
     """
@@ -26,3 +27,37 @@ def setup_and_load_dataset(dataset_config, logger):
     
     logger.info("Dataset loading completed successfully!")
     return data
+
+
+def get_triples(edge_index, edge_type):
+    """
+    Generate triplets from edge_index and edge_type.
+    
+    Args:
+        edge_index: Edge indices [2, num_edges]
+        edge_type: Edge types [num_edges]
+
+    """
+    heads = edge_index[0]
+    tails = edge_index[1]
+    relations = edge_type
+
+    triplets = torch.stack([heads, relations, tails], dim=1)
+    return triplets
+
+def negative_sampling(batch, num_nodes, head_corrupt_prob, device='cpu'):
+    """ Samples negative examples in a batch of triples. Randomly corrupts either heads or tails."""
+    bs, ns, _ = batch.size()
+
+    # new entities to insert
+    corruptions = torch.randint(size=(bs * ns,),low=0, high=num_nodes, dtype=torch.long, device=device)
+
+    # boolean mask for entries to corrupt
+    mask = torch.bernoulli(torch.empty(
+        size=(bs, ns, 1), dtype=torch.float, device=device).fill_(head_corrupt_prob)).to(torch.bool)
+    zeros = torch.zeros(size=(bs, ns, 1), dtype=torch.bool, device=device)
+    mask = torch.cat([mask, zeros, ~mask], dim=2)
+
+    batch[mask] = corruptions
+
+    return batch.view(bs * ns, -1)
