@@ -1,5 +1,7 @@
 from utils.dataset_loader import load_dataset, generate_data
 import torch
+from random import sample
+
 
 def setup_and_load_dataset(dataset_config, logger):
     """
@@ -45,7 +47,7 @@ def get_triples(edge_index, edge_type):
     triplets = torch.stack([heads, relations, tails], dim=1)
     return triplets
 
-def negative_sampling(batch, num_nodes, head_corrupt_prob, device='cpu'):
+def negative_sampling(batch, num_nodes, head_corrupt_prob, device='mps'):
     """ Samples negative examples in a batch of triples. Randomly corrupts either heads or tails."""
     bs, ns, _ = batch.size()
 
@@ -61,3 +63,16 @@ def negative_sampling(batch, num_nodes, head_corrupt_prob, device='cpu'):
     batch[mask] = corruptions
 
     return batch.view(bs * ns, -1)
+
+def generate_batch_triples(triples, num_nodes, config, device):
+
+        positives = sample(range(triples.size(0)), k=config['sampling']['batch_size'])
+        positives = triples[positives].to(device)
+        negatives = positives.clone()[:, None, :].expand(config['sampling']['batch_size'], config['sampling']['negative_sampling_ratio'], 3).contiguous()
+        negatives = negative_sampling(negatives, num_nodes, config['sampling']['head_corrupt_prob'], device=device)
+        batch_idx = torch.cat([positives, negatives], dim=0)
+        # print("batch_idx shape",batch_idx.shape)
+        # print("batch_idx[:, :2].T",batch_idx[:, :2].T)
+
+
+        return positives, negatives, batch_idx
