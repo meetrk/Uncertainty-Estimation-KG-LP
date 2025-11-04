@@ -103,7 +103,7 @@ def main():
     pipeline = Pipeline(
         model=model,
         data=data,
-        config=config_loader.get_section('training'),
+        config=config_loader,
         logger=logger
     )
     
@@ -111,10 +111,10 @@ def main():
     logger.info("Starting training process...")
     training_results = pipeline.start_pipeline()
     print(training_results)
-    '''
+    logger.info("Training process completed.")
+    # pipeline.plot_training_history()
+    
     logger.info("Training completed successfully!")
-    logger.info(f"Final test loss: {training_results['final_test_loss']:.4f}")
-    '''
         
     # except FileNotFoundError as e:
     #     logger.error(f"File not found: {e}")

@@ -1,15 +1,9 @@
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-import numpy as np
 from pathlib import Path
-from torch_geometric.loader import NeighborSampler, LinkLoader
-from torch_geometric.sampler import NegativeSampling
-from random import sample
-from utils.evaluation import mean_reciprocal_rank, hits_at_k
-from utils.utils import get_triples,negative_sampling
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+from utils.utils import get_triples,generate_batch_triples
+from datetime import datetime
 
 class Pipeline:
 
@@ -18,9 +12,12 @@ class Pipeline:
         self.data = data
         self.config = config
         self.logger = logger
-        self.learning_rate = self.config['optimiser']['learning_rate']
-        self.weight_decay = self.config['optimiser']['weight_decay']
+        self.model_config = self.config.get_section('model')
+        self.train_config = self.config.get_section('training')
+        self.learning_rate = self.train_config['optimiser']['learning_rate']
+        self.weight_decay = self.train_config['optimiser']['weight_decay']
         self.device = next(model.parameters()).device
+
 
         self.optimizer = torch.optim.Adam(
             model.parameters(), 
@@ -28,32 +25,36 @@ class Pipeline:
             weight_decay=self.weight_decay
         )
         
+        # Initialize TensorBoard writer
+        log_dir = Path('runs') / f"experiment_{self.config.get_section('dataset')}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        self.writer = SummaryWriter(log_dir=str(log_dir))
+        self.logger.info(f"TensorBoard logs will be saved to: {log_dir}")
+        
+        # Log hyperparameters
+        self.log_hyperparameters()
+        
         # Training state
         self.epoch = 0
         self.training_history = {'train_loss': [], 'eval_metrics': []}
 
     def start_pipeline(self):
-        max_epochs = self.config['epochs']
-        eval_frequency = self.config.get('evaluation_frequency', 10)
-        save_frequency = self.config.get('save_frequency', 20)
+        max_epochs = self.train_config['epochs']
+        eval_frequency = self.train_config.get('evaluation_frequency', 10)
+        save_frequency = self.train_config.get('save_frequency', 20)
         
     
 
         self.logger.info(f"Starting training for {max_epochs} epochs")
         
         tqdm_range = range(1, max_epochs + 1)
-        tqdm_range = tqdm(tqdm_range, desc="Evaluating", unit="batch")
+        tqdm_range = tqdm(tqdm_range, desc="Training", unit="batch")
 
         for epoch in tqdm_range:
             self.epoch = epoch
             
             # Training
             epoch_loss = 0.0
-            positives = sample(range(self.data.train_triplets.size(0)), k=self.config['sampling']['batch_size'])
-            positives = self.data.train_triplets[positives].to(self.device)
-            negatives = positives.clone()[:, None, :].expand(self.config['sampling']['batch_size'], self.config['sampling']['negative_sampling_ratio'], 3).contiguous()
-            negatives = negative_sampling(negatives, self.data.num_nodes, self.config['sampling']['head_corrupt_prob'], device=self.device)
-            batch_idx = torch.cat([positives, negatives], dim=0)
+            positives, negatives, batch_idx = generate_batch_triples(self.data.train_triplets, self.data.num_nodes, self.train_config, self.device)
 
             loss = self.train(
                 edge_label_index=batch_idx[:, :2].T,
@@ -63,20 +64,37 @@ class Pipeline:
             )
             epoch_loss += loss.item()
             self.training_history['train_loss'].append(epoch_loss)
+            
+            # Log training loss to TensorBoard
+            self.writer.add_scalar('Loss/Train', epoch_loss, epoch)
+            
+            # Log gradients periodically
+            if epoch % 10 == 0:  # Log gradients every 10 epochs
+                self.log_model_gradients(epoch)
+            
             self.logger.info(f"Epoch {epoch} completed. Average loss: {epoch_loss:.4f}")
 
             # Evaluation
             if epoch % eval_frequency == 0:
-                eval_metrics = self.evaluate(self.data)
+                eval_metrics = self.evaluate_loss()
                 self.training_history['eval_metrics'].append(eval_metrics)
+                
+                # Log evaluation loss to TensorBoard
+                eval_loss_value = eval_metrics.item() if isinstance(eval_metrics, torch.Tensor) else eval_metrics
+                self.writer.add_scalar('Loss/Validation', eval_loss_value, epoch)
+                
                 self.logger.info(f"Evaluation metrics at epoch {epoch}: {eval_metrics}")
             
             # Save checkpoint
             if epoch % save_frequency == 0:
                 self.save_checkpoint(epoch)
         
+        # Close TensorBoard writer
+        self.writer.close()
         self.logger.info("Training completed!")
         return self.training_history
+
+
 
     def train(self, edge_label_index, edge_label_type, edge_label):
         """
@@ -108,100 +126,88 @@ class Pipeline:
         
         return loss
 
-    def evaluate(self, data):
-        """
-        Evaluate the model on given data.
+    def log_model_gradients(self, epoch):
+        """Log gradient norms to TensorBoard for monitoring."""
+        total_norm = 0
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+                # Log individual parameter gradients
+                self.writer.add_scalar(f'Gradients/{name}', param_norm, epoch)
         
-        Args:
-            data: PyG data object with evaluation edges
-            
-        Returns:
-            Dictionary with evaluation metrics
+        total_norm = total_norm ** (1. / 2)
+        self.writer.add_scalar('Gradients/Total_Norm', total_norm, epoch)
+
+    def log_hyperparameters(self):
+        """Log hyperparameters to TensorBoard."""
+        hparams = {
+            'learning_rate': self.learning_rate,
+            'weight_decay': self.weight_decay,
+            'epochs': self.train_config['epochs'],
+            'batch_size': self.train_config['sampling']['batch_size'],
+            'negative_sampling_ratio': self.train_config['sampling']['negative_sampling_ratio'],
+            'embedding_dim': self.model_config['encoder']['embedding_dim'],
+            'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
+            'num_bases': self.model_config['encoder']['num_bases'],
+            'b_init': self.model_config['decoder']['b_init'],
+            'w_init': self.model_config['decoder']['w_init'],
+            'w_gain': self.model_config['decoder']['w_gain']
+        }
+        
+        # Add text summary of hyperparameters
+        hparam_text = "\n".join([f"{key}: {value}" for key, value in hparams.items()])
+        self.writer.add_text('Hyperparameters', hparam_text, 0)
+        
+        # Log as scalars for easy comparison
+        for key, value in hparams.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(f'Hyperparameters/{key}', value, 0)
+
+    
+    def evaluate_loss(self):
+        """
+        Evaluate average loss on a validation/test split produced by RandomLinkSplit.
         """
         self.model.eval()
         with torch.no_grad():
-            self.logger.info("Starting evaluation...")
+            entities = torch.arange(self.data.num_nodes, device=self.device)
+            entity_embedding = self.model(entities, self.data.val_graph.edge_index, self.data.val_graph.edge_type)
+            positives, negatives, val_triplets = generate_batch_triples(self.data.valid_triplets, self.data.num_nodes, self.train_config, self.device)
+            val_edge_labels=torch.cat([torch.ones(positives.size(0), device=self.device), 
+                                      torch.zeros(negatives.size(0), device=self.device)])
+            val_loss = self.model.score_loss(entity_embedding, val_triplets, val_edge_labels)
             
-            # Use test triplets for evaluation
-            test_triplets = data.test_triplets.to(self.device)
-            all_triplets = data.all_triplets.to(self.device)
-            
-            # Get all entities and generate embeddings using the full graph
-            entities = torch.arange(data.num_nodes, device=self.device)
-            entity_embeddings = self.model(entities, data.edge_index.to(self.device), data.edge_type.to(self.device))
-            
-            # Evaluate in batches to avoid memory issues
-            batch_size = self.config['evaluation']['batch_size']
-            num_test = test_triplets.size(0)
-            all_ranks = []
+            return val_loss
+        
 
-            tqdm_range = range(0, num_test, batch_size)
-            if self.config.get('evaluation', {}).get('verbose', False):
-                
-                tqdm_range = tqdm(tqdm_range, desc="Evaluating", unit="batch")
 
-            for i in tqdm_range:
-                batch_end = min(i + batch_size, num_test)
-                batch_triplets = test_triplets[i:batch_end]
-                
-                # For each test triplet, compute ranks for head and tail prediction
-                for triplet in batch_triplets:
-                    h, r, t = triplet[0].item(), triplet[1].item(), triplet[2].item()
-                    
-                    # Head prediction: corrupt head, keep relation and tail fixed
-                    head_scores = []
-                    for candidate_h in range(data.num_nodes):
-                        candidate_triplet = torch.tensor([[candidate_h, r, t]], device=self.device)
-                        score = self.model.decoder(entity_embeddings, candidate_triplet)
-                        head_scores.append(score.item())
-                    
-                    head_scores = torch.tensor(head_scores, device=self.device)
-                    
-                    # Filter out known true triplets (except the target)
-                    for known_triplet in all_triplets:
-                        kh, kr, kt = known_triplet[0].item(), known_triplet[1].item(), known_triplet[2].item()
-                        if kr == r and kt == t and kh != h:
-                            head_scores[kh] = float('-inf')
-                    
-                    # Calculate rank for head prediction
-                    target_score = head_scores[h]
-                    head_rank = (head_scores >= target_score).sum().item()
-                    all_ranks.append(head_rank)
-                    
-                    # Tail prediction: corrupt tail, keep head and relation fixed
-                    tail_scores = []
-                    for candidate_t in range(data.num_nodes):
-                        candidate_triplet = torch.tensor([[h, r, candidate_t]], device=self.device)
-                        score = self.model.decoder(entity_embeddings, candidate_triplet)
-                        tail_scores.append(score.item())
-                    
-                    tail_scores = torch.tensor(tail_scores, device=self.device)
-                    
-                    # Filter out known true triplets (except the target)
-                    for known_triplet in all_triplets:
-                        kh, kr, kt = known_triplet[0].item(), known_triplet[1].item(), known_triplet[2].item()
-                        if kh == h and kr == r and kt != t:
-                            tail_scores[kt] = float('-inf')
-                    
-                    # Calculate rank for tail prediction
-                    target_score = tail_scores[t]
-                    tail_rank = (tail_scores >= target_score).sum().item()
-                    all_ranks.append(tail_rank)
-            
-            # Calculate metrics
-            mrr = mean_reciprocal_rank(all_ranks)
-            hits_1 = hits_at_k(all_ranks, 1)
-            hits_3 = hits_at_k(all_ranks, 3)
-            hits_10 = hits_at_k(all_ranks, 10)
-            
-            self.logger.info(f"Evaluation completed. MRR: {mrr:.4f}, Hits@1: {hits_1:.4f}, Hits@3: {hits_3:.4f}, Hits@10: {hits_10:.4f}")
 
-        return {
-            'MRR': mrr,
-            'Hits@1': hits_1,
-            'Hits@3': hits_3,
-            'Hits@10': hits_10
-        }
+    # def plot_training_history(self):
+    #     """Plot training loss and evaluation loss over epochs."""
+    #     import matplotlib.pyplot as plt
+
+    #     epochs = range(1, len(self.training_history['train_loss']) + 1)
+        
+    #     plt.figure(figsize=(10, 6))
+    #     plt.plot(epochs, self.training_history['train_loss'], label='Training Loss', marker='o', alpha=0.7)
+        
+    #     # Plot evaluation metrics on the same graph
+    #     if self.training_history['eval_metrics']:
+    #         eval_frequency = self.train_config.get('evaluation_frequency', 10)
+    #         eval_loss_values = [metrics.item() if isinstance(metrics, torch.Tensor) else metrics 
+    #                            for metrics in self.training_history['eval_metrics']]
+    #         eval_epochs = [i * eval_frequency for i in range(1, len(eval_loss_values) + 1)]
+            
+    #         plt.plot(eval_epochs, eval_loss_values, label='Validation Loss', marker='s', alpha=0.7)
+        
+    #     plt.xlabel('Epochs')
+    #     plt.ylabel('Loss')
+    #     plt.title('Training and Validation Loss over Epochs')
+    #     plt.legend()
+    #     plt.grid(True, alpha=0.3)
+    #     plt.tight_layout()
+    #     plt.show()
     
     def save_checkpoint(self, epoch):
         """Save model checkpoint."""
@@ -231,3 +237,9 @@ class Pipeline:
         self.epoch = checkpoint['epoch']
         
         self.logger.info(f"Checkpoint loaded from {checkpoint_path}")
+    
+    def __del__(self):
+        """Cleanup TensorBoard writer when pipeline is destroyed."""
+        if hasattr(self, 'writer'):
+            self.writer.close()
+

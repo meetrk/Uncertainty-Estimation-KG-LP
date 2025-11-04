@@ -18,10 +18,17 @@ model:
     b_init: true
   
 training:
-  epochs: 100
-  batch_size: 1024
-  learning_rate: 0.01
-  weight_decay: 0.0001
-  negative_sampling_ratio: 10
-  evaluation_frequency: 10
-  save_frequency: 20
+  epochs: 200
+  sampling:
+    batch_size: 1024
+    negative_sampling_ratio: 5
+    head_corrupt_prob: 0.5
+  optimiser:
+    learning_rate: 0.01
+    weight_decay: 0.0001
+  evaluation_frequency: 20
+  save_frequency: 100
+  evaluation:
+    batch_size: 64
+    verbose: true
+    filter_candidates: true
