@@ -6,3 +6,5 @@ venv/
 *.log
 .vscode/
 checkpoints/
+runs/
+training.log
