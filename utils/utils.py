@@ -1,6 +1,7 @@
 from utils.dataset_loader import load_dataset, generate_data
 import torch
 from random import sample
+import numpy as np
 
 
 def setup_and_load_dataset(dataset_config, logger):
@@ -64,15 +65,76 @@ def negative_sampling(batch, num_nodes, head_corrupt_prob, device='mps'):
 
     return batch.view(bs * ns, -1)
 
-def generate_batch_triples(triples, num_nodes, config, device):
 
+def edge_neighborhood(train_triples, sample_size=30000, num_nodes=None):
+    """ Edge neighborhood sampling """
+
+    if num_nodes is None:
+        num_nodes = train_triples.max().item() + 1
+    
+    adj_list = [[] for _ in range(num_nodes)]
+    for i, triplet in enumerate(train_triples):
+        adj_list[triplet[0]].append([i, triplet[2]])
+        adj_list[triplet[2]].append([i, triplet[0]])
+
+    degrees = np.array([len(a) for a in adj_list])
+    adj_list = [np.array(a) for a in adj_list]
+
+    edges = np.zeros((sample_size), dtype=np.int32)
+
+    sample_counts = np.array([d for d in degrees])
+    picked = np.array([False for _ in train_triples])
+    seen = np.array([False for _ in degrees])
+
+    for i in range(0, sample_size):
+        weights = sample_counts * seen
+
+        if np.sum(weights) == 0:
+            weights = np.ones_like(weights)
+            weights[np.where(sample_counts == 0)] = 0
+
+        probabilities = (weights) / np.sum(weights)
+        chosen_vertex = np.random.choice(np.arange(degrees.shape[0]), p=probabilities)
+        chosen_adj_list = adj_list[chosen_vertex]
+        seen[chosen_vertex] = True
+
+        chosen_edge = np.random.choice(np.arange(chosen_adj_list.shape[0]))
+        chosen_edge = chosen_adj_list[chosen_edge]
+        edge_number = chosen_edge[0]
+
+        while picked[edge_number]:
+            chosen_edge = np.random.choice(np.arange(chosen_adj_list.shape[0]))
+            chosen_edge = chosen_adj_list[chosen_edge]
+            edge_number = chosen_edge[0]
+
+        edges[i] = edge_number
+        other_vertex = chosen_edge[1]
+        picked[edge_number] = True
+        sample_counts[chosen_vertex] -= 1
+        sample_counts[other_vertex] -= 1
+        seen[other_vertex] = True
+
+    edges = [train_triples[e] for e in edges]
+    return edges
+
+
+
+def generate_batch_triples(triples, num_nodes, config, device, sampling="sample"):
+
+    """ Generate batch of positive and negative triples for training """
+    if sampling == "edge-neighborhood":
+        positives = edge_neighborhood(triples, sample_size=config['sampling']['batch_size'], num_nodes=num_nodes)
+        positives = torch.stack(positives).to(device) # triples: (batch_size, negative_sampling_ratio, 3)
+    elif sampling == "sample":
         positives = sample(range(triples.size(0)), k=config['sampling']['batch_size'])
         positives = triples[positives].to(device)
-        negatives = positives.clone()[:, None, :].expand(config['sampling']['batch_size'], config['sampling']['negative_sampling_ratio'], 3).contiguous()
-        negatives = negative_sampling(negatives, num_nodes, config['sampling']['head_corrupt_prob'], device=device)
-        batch_idx = torch.cat([positives, negatives], dim=0)
-        # print("batch_idx shape",batch_idx.shape)
-        # print("batch_idx[:, :2].T",batch_idx[:, :2].T)
+    else:
+        raise ValueError(f"Unknown sampling method: {sampling}")
 
+    negatives = positives.clone()[:, None, :].expand(config['sampling']['batch_size'], config['sampling']['negative_sampling_ratio'], 3).contiguous()     
+    negatives = negative_sampling(negatives, num_nodes, config['sampling']['head_corrupt_prob'], device=device) # triples: (batch_size * negative_sampling_ratio, 3)
+    batch_idx = torch.cat([positives, negatives], dim=0)
 
-        return positives, negatives, batch_idx
+    return positives, negatives, batch_idx        
+  
+
