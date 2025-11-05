@@ -6,6 +6,7 @@ from utils.config_loader import ConfigLoader
 from utils.utils import setup_and_load_dataset
 from model.encoder.model import RGCN
 from model.decoder.distmult import DistMultDecoder
+from model.decoder.transe import TransE
 from model.trainer.pipeline import Pipeline
 import torch
 
@@ -78,11 +79,19 @@ def main():
         raise ValueError("Cannot determine number of nodes from data")
     
     logger.info(f"Dataset loaded: {num_nodes} nodes, {data.num_relations} relations")
-    decoder = DistMultDecoder(
+
+    # Initialize decoder
+    if config_loader.get_section('model')['decoder']['type'] == 'DistMult':
+        decoder = DistMultDecoder
+    elif config_loader.get_section('model')['decoder']['type'] == 'TransE':
+        decoder = TransE
+    else:
+        raise ValueError("Unsupported decoder type specified")
+
+    decoder = decoder(
         num_relations=data.num_relations,
         embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
         num_nodes=num_nodes,
-        w_init=config_loader.get_section('model')['decoder']['w_init'],
         w_gain=config_loader.get_section('model')['decoder']['w_gain'],
         b_init=config_loader.get_section('model')['decoder']['b_init'],
     )
