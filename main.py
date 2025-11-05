@@ -110,11 +110,10 @@ def main():
     # Start training
     logger.info("Starting training process...")
     training_results = pipeline.start_pipeline()
-    print(training_results)
     logger.info("Training process completed.")
-    # pipeline.plot_training_history()
     
-    logger.info("Training completed successfully!")
+    logger.info(f"Training results: {training_results}")
+    # pipeline.plot_training_history()
         
     # except FileNotFoundError as e:
     #     logger.error(f"File not found: {e}")
