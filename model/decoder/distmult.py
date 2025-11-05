@@ -41,12 +41,10 @@ class DistMultDecoder(Decoder):
     def __init__(self, num_relations,
                 embedding_dim,
                 num_nodes,
-                w_init='standard-normal',
                 w_gain=False,
                 b_init=True,
                 ):
         super(DistMultDecoder, self).__init__(num_relations, embedding_dim)
-        self.w_init = w_init
         self.w_gain = w_gain
         self.b_init = b_init
 
@@ -78,7 +76,6 @@ class DistMultDecoder(Decoder):
             init(self.sbias)
             init(self.pbias)
             init(self.obias)
-        nn.init.xavier_uniform_(self.relations_embedding, gain=nn.init.calculate_gain('relu'))
     
     def forward(self, embedding, triplets):
         """
@@ -94,6 +91,7 @@ class DistMultDecoder(Decoder):
         s = embedding[triplets[:, 0]]  # Head entities
         r = self.relations_embedding[triplets[:, 1]]  # Relations
         o = embedding[triplets[:, 2]]  # Tail entities
+    
         scores = torch.sum(s * r * o, dim=1)
 
         if self.b_init:
@@ -101,7 +99,12 @@ class DistMultDecoder(Decoder):
 
         return scores
     
-    def regularization_loss(self):
-        """L2 regularization on relation embeddings."""
-        return torch.mean(self.relations_embedding.pow(2))
+    def s_penalty(self, triples, nodes):
+        """ Compute Schlichtkrull L2 penalty for the decoder """
+
+        s_index, p_index, o_index = triples[:,0],triples[:,1],triples[:,2]
+
+        s, p, o = nodes[s_index, :], self.relations_embedding[p_index, :], nodes[o_index, :]
+
+        return s.pow(2).mean() + p.pow(2).mean() + o.pow(2).mean()
     

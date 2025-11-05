@@ -4,6 +4,7 @@ from torch import nn
 import torch.nn.functional as F
 import torch
 from model.decoder.distmult import DistMultDecoder
+from utils.utils import get_triples
 
 
 class RGCN(nn.Module):
@@ -28,7 +29,8 @@ class RGCN(nn.Module):
         self.embedding_dim = embedding_dim
         
         # Entity embeddings (encoder)
-        self.entity_embedding = nn.Embedding(num_entities, embedding_dim)
+        self.entity_embedding = nn.Parameter(torch.FloatTensor(num_entities, embedding_dim))
+        self.entity_embedding_bias = nn.Parameter(torch.zeros(1, embedding_dim))
         
         # RGCN layers
         self.conv1 = RGCNLayer(
@@ -44,7 +46,7 @@ class RGCN(nn.Module):
         else:
             self.decoder = decoder
     
-    def forward(self, entity, edge_index, edge_type):
+    def forward(self, edge_index, edge_type,config):
         """
         Encode entities using RGCN layers.
         
@@ -56,38 +58,27 @@ class RGCN(nn.Module):
         Returns:
             Entity embeddings [num_entities, embedding_dim]
         """
-        x = self.entity_embedding(entity)
-        x = F.relu(self.conv1(x, edge_index, edge_type))
-        x = F.dropout(x, p=self.dropout_ratio, training=self.training)
-        x = self.conv2(x, edge_index, edge_type)
-        
-        return x
 
-    def score_loss(self, embedding, triplets, target):
-        """
-        Compute prediction loss using the decoder.
+        x = self.entity_embedding + self.entity_embedding_bias
+        x = torch.nn.functional.relu(x)
+        x = self.conv1(x, edge_index, edge_type)
+        x = F.relu(x)
+        x = self.conv2(x, edge_index, edge_type)
+
+        triples = get_triples(edge_index=edge_index,edge_type=edge_type)
+
+        score = self.decoder(x, triples)
+        penalty = self.compute_penalty(triples,x,config)
         
-        Args:
-            embedding: Entity embeddings from forward pass
-            triplets: Triplet indices [batch_size, 3]
-            target: Binary labels [batch_size]
-        
-        Returns:
-            Binary cross entropy loss
-        """
-        score = self.decoder(embedding, triplets)
-        return F.binary_cross_entropy_with_logits(score, target)
+        return score,penalty
+
+    def compute_penalty(self, batch, x, config):
+        """ Compute L2 penalty for decoder """
+        if config['decoder']['l2_penalty'] == 0.0:
+            return 0
+
+        if config['decoder']['l2_penalty_type'] == 'schlichtkrull-l2':
+            return self.decoder.s_penalty(batch, x)
+        else:
+            return self.decoder.relations_embedding.pow(2).sum()
     
-    def reg_loss(self, embedding):
-        """
-        Compute regularization loss for both encoder and decoder.
-        
-        Args:
-            embedding: Entity embeddings from forward pass
-        
-        Returns:
-            Combined L2 regularization loss
-        """
-        entity_reg = torch.mean(embedding.pow(2))
-        decoder_reg = self.decoder.regularization_loss()
-        return entity_reg + decoder_reg

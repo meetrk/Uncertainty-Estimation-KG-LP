@@ -48,6 +48,27 @@ def get_triples(edge_index, edge_type):
     triplets = torch.stack([heads, relations, tails], dim=1)
     return triplets
 
+
+def get_edges(triplets):
+    """
+    Generate edge_index and edge_type from triplets.
+    
+    Args:
+        triplets: Triplets [num_triplets, 3] where each row is [head, relation, tail]
+        
+    Returns:
+        edge_index: Edge indices [2, num_triplets]
+        edge_type: Edge types [num_triplets]
+    """
+    heads = triplets[:, 0]
+    relations = triplets[:, 1]
+    tails = triplets[:, 2]
+    
+    edge_index = torch.stack([heads, tails], dim=0)
+    edge_type = relations
+    
+    return edge_index, edge_type
+
 def negative_sampling(batch, num_nodes, head_corrupt_prob, device='mps'):
     """ Samples negative examples in a batch of triples. Randomly corrupts either heads or tails."""
     bs, ns, _ = batch.size()

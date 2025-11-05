@@ -2,8 +2,11 @@ import torch
 from pathlib import Path
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from utils.utils import get_triples,generate_batch_triples
+from utils.utils import generate_batch_triples
+import torch.nn.functional as F 
 from datetime import datetime
+import numpy as np
+from utils.utils import get_edges
 
 class Pipeline:
 
@@ -54,13 +57,15 @@ class Pipeline:
             
             # Training
             epoch_loss = 0.0
-            positives, negatives, batch_idx = generate_batch_triples(self.data.train_triplets, self.data.num_nodes, self.train_config, self.device)
+            positives, negatives, batch_idx = generate_batch_triples(self.data.train_triplets, self.data.num_nodes, self.train_config, self.device, sampling=self.train_config['sampling']['method'])
 
             loss = self.train(
                 edge_label_index=batch_idx[:, :2].T,
                 edge_label_type=batch_idx[:, 1],
-                edge_label=torch.cat([torch.ones(positives.size(0), device=self.device), 
-                                      torch.zeros(negatives.size(0), device=self.device)])
+                edge_label= torch.cat([
+                    torch.ones(positives.size(0), dtype=torch.float, device=self.device), 
+                    torch.zeros(negatives.size(0), dtype=torch.float, device=self.device)
+                ], dim=0)
             )
             epoch_loss += loss.item()
             self.training_history['train_loss'].append(epoch_loss)
@@ -76,6 +81,21 @@ class Pipeline:
 
             # Evaluation
             if epoch % eval_frequency == 0:
+    
+                # metrics = evaluate_distmult(
+                #     triples=self.data.valid_triplets,
+                #     entity_embeddings=self.model.entity_embedding.detach().cpu().numpy(),
+                #     relation_embeddings=self.model.decoder.relations_embedding.detach().cpu().numpy(),
+                #     known_triples= torch.cat([self.data.train_triplets, self.data.valid_triplets, self.data.test_triplets],dim=0),
+                #     ks=[1,3,10]
+                # )
+                # self.writer.add_scalar("LP/MRR", float(metrics["MRR"]), epoch)
+                # self.writer.add_scalar("LP/Hits@1", float(metrics["Hits@K"][1]), epoch)
+                # self.writer.add_scalar("LP/Hits@3", float(metrics["Hits@K"][3]), epoch)
+                # self.writer.add_scalar("LP/Hits@10", float(metrics["Hits@K"][10]), epoch)
+                # self.logger.info(f"Evaluation metrics at epoch {epoch}: {metrics}")
+
+                
                 eval_metrics = self.evaluate_loss()
                 self.training_history['eval_metrics'].append(eval_metrics)
                 
@@ -84,6 +104,7 @@ class Pipeline:
                 self.writer.add_scalar('Loss/Validation', eval_loss_value, epoch)
                 
                 self.logger.info(f"Evaluation metrics at epoch {epoch}: {eval_metrics}")
+                
             
             # Save checkpoint
             if epoch % save_frequency == 0:
@@ -109,23 +130,19 @@ class Pipeline:
         edge_label_type = edge_label_type.to(self.device)
         edge_label = edge_label.to(self.device)
 
-        entities = torch.arange(self.data.num_nodes, device=self.device)
-        entity_embeddings = self.model(entities, edge_label_index, edge_label_type) ## generating embedding only for nodes in the batch
+        score, penalty = self.model(edge_label_index, edge_label_type,self.model_config) ## generating embedding only for nodes in the batch
 
-        triplets = get_triples(edge_label_index, edge_label_type)
         # Compute loss
-        loss = self.model.score_loss(entity_embeddings, triplets, edge_label.float()) ## calculate the loss
+        loss = F.binary_cross_entropy_with_logits(score, edge_label)
+        loss  = loss + (self.model_config['decoder']['l2_penalty'] * penalty)
 
         # Backward pass
         loss.backward()
 
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
         self.optimizer.step()
-        
         return loss
 
+    
     def log_model_gradients(self, epoch):
         """Log gradient norms to TensorBoard for monitoring."""
         total_norm = 0
@@ -151,8 +168,8 @@ class Pipeline:
             'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
             'num_bases': self.model_config['encoder']['num_bases'],
             'b_init': self.model_config['decoder']['b_init'],
-            'w_init': self.model_config['decoder']['w_init'],
-            'w_gain': self.model_config['decoder']['w_gain']
+            'w_gain': self.model_config['decoder']['w_gain'],
+            'sampling_method': self.train_config['sampling']['method']
         }
         
         # Add text summary of hyperparameters
@@ -171,43 +188,20 @@ class Pipeline:
         """
         self.model.eval()
         with torch.no_grad():
-            entities = torch.arange(self.data.num_nodes, device=self.device)
-            entity_embedding = self.model(entities, self.data.val_graph.edge_index, self.data.val_graph.edge_type)
-            positives, negatives, val_triplets = generate_batch_triples(self.data.valid_triplets, self.data.num_nodes, self.train_config, self.device)
+
+            positives, negatives, val_triplets = generate_batch_triples(self.data.valid_triplets, self.data.num_nodes, self.train_config, self.device, sampling=self.train_config['sampling']['method'])
+
+            val_edge_index,val_edge_labels = get_edges(triplets=val_triplets)
+
+            score, _ = self.model(val_edge_index, val_edge_labels,self.model_config)
+
             val_edge_labels=torch.cat([torch.ones(positives.size(0), device=self.device), 
                                       torch.zeros(negatives.size(0), device=self.device)])
-            val_loss = self.model.score_loss(entity_embedding, val_triplets, val_edge_labels)
-            
+            # Compute loss
+            val_loss = F.binary_cross_entropy_with_logits(score, val_edge_labels)
+
             return val_loss
         
-
-
-
-    # def plot_training_history(self):
-    #     """Plot training loss and evaluation loss over epochs."""
-    #     import matplotlib.pyplot as plt
-
-    #     epochs = range(1, len(self.training_history['train_loss']) + 1)
-        
-    #     plt.figure(figsize=(10, 6))
-    #     plt.plot(epochs, self.training_history['train_loss'], label='Training Loss', marker='o', alpha=0.7)
-        
-    #     # Plot evaluation metrics on the same graph
-    #     if self.training_history['eval_metrics']:
-    #         eval_frequency = self.train_config.get('evaluation_frequency', 10)
-    #         eval_loss_values = [metrics.item() if isinstance(metrics, torch.Tensor) else metrics 
-    #                            for metrics in self.training_history['eval_metrics']]
-    #         eval_epochs = [i * eval_frequency for i in range(1, len(eval_loss_values) + 1)]
-            
-    #         plt.plot(eval_epochs, eval_loss_values, label='Validation Loss', marker='s', alpha=0.7)
-        
-    #     plt.xlabel('Epochs')
-    #     plt.ylabel('Loss')
-    #     plt.title('Training and Validation Loss over Epochs')
-    #     plt.legend()
-    #     plt.grid(True, alpha=0.3)
-    #     plt.tight_layout()
-    #     plt.show()
     
     def save_checkpoint(self, epoch):
         """Save model checkpoint."""
@@ -243,3 +237,119 @@ class Pipeline:
         if hasattr(self, 'writer'):
             self.writer.close()
 
+    
+
+import numpy as np
+from collections import defaultdict
+from contextlib import nullcontext
+from tqdm import tqdm
+
+def evaluate_distmult(
+    triples,
+    entity_embeddings,
+    relation_embeddings,
+    known_triples=None,
+    ks=(1, 3, 10),
+    filtered_index=None,
+):
+    """
+    Filtered MRR and Hits@K for link prediction with DistMult.
+
+    Parameters
+    ----------
+    triples : iterable[tuple[int,int,int]]
+    entity_embeddings : (num_entities, d) array-like (NumPy recommended)
+    relation_embeddings : (num_relations, d) array-like
+    known_triples : set[(h,r,t)] | None
+    ks : iterable[int]
+    filtered_index : optional dict with two maps to speed filtering:
+        {
+          'hr_to_t': dict[(h,r)] -> np.ndarray of true tails (including the eval t),
+          'rt_to_h': dict[(r,t)] -> np.ndarray of true heads (including the eval h),
+        }
+        If not provided but known_triples is, it will be built.
+
+    Returns
+    -------
+    {"MRR": float, "Hits@K": {K: float}}
+    """
+    # Ensure NumPy arrays
+    E = np.asarray(entity_embeddings, dtype=np.float32)
+    R = np.asarray(relation_embeddings, dtype=np.float32)
+    N, d = E.shape
+    assert R.shape[1] == d, "Entity and relation embeddings must share dimension d"
+
+    # Precompute ET for fast tail scoring
+    ET = E.T  # (d, N)
+
+    # Build filtered index if needed
+    if known_triples is not None and filtered_index is None:
+        hr_to_t = defaultdict(list)
+        rt_to_h = defaultdict(list)
+        for (hh, rr, tt) in known_triples:
+            hr_to_t[(hh, rr)].append(tt)
+            rt_to_h[(rr, tt)].append(hh)
+        # Convert lists to arrays for fast masking
+        filtered_index = {
+            "hr_to_t": {k: np.array(v, dtype=np.int64) for k, v in hr_to_t.items()},
+            "rt_to_h": {k: np.array(v, dtype=np.int64) for k, v in rt_to_h.items()},
+        }
+
+    ks = tuple(int(k) for k in ks)
+    rr_sum = 0.0
+    hits_counts = {K: 0.0 for K in ks}
+
+    # Iterate triples
+    for (h, r, t) in tqdm(triples, desc="Evaluating", unit="triple"):
+        # Tail ranking (h, r, ?): scores for all t'
+        # DistMult => (E[h] * R[r]) @ E.T
+        hr = E[h] * R[r]                    # (d,)
+        scores_tail = hr @ ET               # (N,)
+
+        # Filter other true tails for (h,r)
+        if known_triples is not None:
+            idx = filtered_index["hr_to_t"].get((h, r), None)
+            if idx is not None and idx.size > 0:
+                # mask out all true tails except the target t
+                # set to -inf so they don't affect ranking
+                mask_idx = idx[idx != t]
+                if mask_idx.size > 0:
+                    scores_tail[mask_idx] = -np.inf
+
+        # Rank of true t (higher is better); use competition ranking
+        # Rank = 1 + count of strictly greater scores
+        st = scores_tail[t]
+        # Protect against NaN/inf
+        if not np.isfinite(st):
+            st = -np.inf
+        rank_t = int(np.sum(scores_tail > st)) + 1
+
+        # Head ranking (?, r, t): scores for all h'
+        rt = R[r] * E[t]                    # (d,)
+        scores_head = E @ rt                # (N,)
+
+        if known_triples is not None:
+            idx = filtered_index["rt_to_h"].get((r, t), None)
+            if idx is not None and idx.size > 0:
+                mask_idx = idx[idx != h]
+                if mask_idx.size > 0:
+                    scores_head[mask_idx] = -np.inf
+
+        sh = scores_head[h]
+        if not np.isfinite(sh):
+            sh = -np.inf
+        rank_h = int(np.sum(scores_head > sh)) + 1
+
+        rr = 0.5 * (1.0 / rank_t + 1.0 / rank_h)
+        rr_sum += rr
+
+        for K in ks:
+            hits_counts[K] += 0.5 * ((rank_t <= K) + (rank_h <= K))
+
+    n = len(triples) if hasattr(triples, "__len__") else int(getattr(triples, "shape", [0])[0])
+    if n == 0:
+        return {"MRR": 0.0, "Hits@K": {K: 0.0 for K in ks}}
+
+    mrr = rr_sum / n
+    hits_at_k = {K: hits_counts[K] / n for K in ks}
+    return {"MRR": float(mrr), "Hits@K": {K: float(v) for K, v in hits_at_k.items()}}
