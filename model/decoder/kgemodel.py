@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 from torch.nn import Embedding
 from tqdm import tqdm
+from torch.nn import Parameter
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 
@@ -32,12 +33,13 @@ class KGEModel(torch.nn.Module):
         self.num_nodes = num_nodes
         self.num_relations = num_relations
         self.hidden_channels = hidden_channels
-
-        self.rel_emb = Embedding(num_relations, hidden_channels, sparse=sparse)
+        self.rel_emb = Parameter(torch.FloatTensor(num_relations, hidden_channels))
+        # self.rel_emb = Embedding(num_relations, hidden_channels, sparse=sparse)
 
     def reset_parameters(self):
         r"""Resets all learnable parameters of the module."""
-        self.rel_emb.reset_parameters()
+        # self.rel_emb.reset_parameters()
+
 
     def forward(
         self,
@@ -103,6 +105,7 @@ class KGEModel(torch.nn.Module):
     @torch.no_grad()
     def test(
         self,
+        X,
         head_index: Tensor,
         rel_type: Tensor,
         tail_index: Tensor,
@@ -133,7 +136,7 @@ class KGEModel(torch.nn.Module):
             scores = []
             tail_indices = torch.arange(self.num_nodes, device=t.device)
             for ts in tail_indices.split(batch_size):
-                scores.append(self(h.expand_as(ts), r.expand_as(ts), ts))
+                scores.append(self(X,h.expand_as(ts), r.expand_as(ts), ts))
             rank = int((torch.cat(scores).argsort(
                 descending=True) == t).nonzero().view(-1))
             mean_ranks.append(rank)

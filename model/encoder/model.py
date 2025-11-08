@@ -6,6 +6,8 @@ import torch
 from model.decoder.distmult import DistMult
 from utils.utils import get_triples
 from sklearn.metrics import roc_auc_score
+from torch_geometric.nn.conv import RGCNConv
+from torch import Tensor
 
 
 class RGCN(nn.Module):
@@ -40,6 +42,23 @@ class RGCN(nn.Module):
         self.conv2 = RGCNLayer(
             hidden_layer_size, embedding_dim, num_relations * 2, num_bases=num_bases)
         
+        # self.conv1 = RGCNConv(
+        #     in_channels=embedding_dim,
+        #     out_channels=hidden_layer_size,
+        #     num_relations=num_relations,
+        #     num_bases=num_bases,
+        #     aggr="add",
+        #     bias=False
+        # )
+        # self.conv2 = RGCNConv(
+        #     in_channels=embedding_dim,
+        #     out_channels=hidden_layer_size,
+        #     num_relations=num_relations,
+        #     num_bases=num_bases,
+        #     aggr="add",
+        #     bias=False
+        # )
+
         self.dropout_ratio = dropout
         
         # Decoder (modular component)
@@ -73,4 +92,27 @@ class RGCN(nn.Module):
         loss,roc_auc_score = self.decoder.loss(x, triples[:,0], triples[:,1], triples[:,2])
         
         return pred_logits, loss, roc_auc_score
+    
+    @torch.no_grad()
+    def test(
+        self,
+        head_index: Tensor,
+        rel_type: Tensor,
+        tail_index: Tensor,
+        batch_size: int,
+        k: int = 10,
+        log: bool = True):
+
+        self.eval()
+        print("Starting evaluation...")
+        print(f"Batch size: {batch_size}, Top-K: {k}")
+        return self.decoder.test(
+            self.entity_embedding + self.entity_embedding_bias,
+            head_index,
+            rel_type,
+            tail_index,
+            batch_size,
+            k,
+            log
+        )
 
