@@ -147,6 +147,8 @@ def generate_batch_triples(triples, num_nodes, config, device, mode, sampling="s
         sample_size = config['sampling']['batch_size'] 
     elif mode == "eval":
         sample_size = triples.size(0)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
     
     if sampling == "edge-neighborhood":
         batch = edge_neighborhood(triples, sample_size=sample_size, num_nodes=num_nodes)

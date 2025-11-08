@@ -49,7 +49,9 @@ class DistMult(KGEModel):
         self.reset_parameters()
 
     def reset_parameters(self):
-        torch.nn.init.xavier_uniform_(self.rel_emb.weight)
+        r"""Resets all learnable parameters of the module."""
+        # super().reset_parameters()
+        torch.nn.init.xavier_uniform_(self.rel_emb)
 
     def forward(
         self,
@@ -61,7 +63,7 @@ class DistMult(KGEModel):
 
 
         head = X[head_index]
-        rel = self.rel_emb(rel_type)
+        rel = self.rel_emb[rel_type]
         tail = X[tail_index]
 
         return (head * rel * tail).sum(dim=-1)
