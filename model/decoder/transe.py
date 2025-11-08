@@ -1,86 +1,83 @@
-from model.decoder.distmult import Decoder
-import torch 
-from torch import nn
-from torch.nn import Parameter
-from utils.initialiser import schlichtkrull_normal_
-from torch.nn.init import uniform_  
-from torch.nn import functional as F
+import math
 
+import torch
+import torch.nn.functional as F
+from torch import Tensor
 
+from model.decoder.kgemodel import KGEModel
 
+class TransE(KGEModel):
+    r"""The TransE model from the `"Translating Embeddings for Modeling
+    Multi-Relational Data" <https://proceedings.neurips.cc/paper/2013/file/
+    1cecc7a77928ca8133fa24680a88d2f9-Paper.pdf>`_ paper.
 
-class TransE(Decoder):
+    :class:`TransE` models relations as a translation from head to tail
+    entities such that
 
+    .. math::
+        \mathbf{e}_h + \mathbf{e}_r \approx \mathbf{e}_t,
 
+    resulting in the scoring function:
 
-    def __init__(self, num_relations,
-                embedding_dim,
-                num_nodes,
-                w_init='standard-normal',
-                w_gain=False,
-                b_init=True,
-                ):
-        super(TransE, self).__init__(num_relations, embedding_dim)
+    .. math::
+        d(h, r, t) = - {\| \mathbf{e}_h + \mathbf{e}_r - \mathbf{e}_t \|}_p
 
-        self.relations_embedding = Parameter(torch.FloatTensor(num_relations, embedding_dim))
-        self.b_init = b_init
-        if b_init:
-            self.sbias = Parameter(torch.FloatTensor(num_nodes))
-            self.obias = Parameter(torch.FloatTensor(num_nodes))
-            self.pbias = Parameter(torch.FloatTensor(num_relations))
-        else:
-            self.register_parameter('sbias', None)
-            self.register_parameter('obias', None)
-            self.register_parameter('pbias', None)
+    .. note::
 
+        For an example of using the :class:`TransE` model, see
+        `examples/kge_fb15k_237.py
+        <https://github.com/pyg-team/pytorch_geometric/blob/master/examples/
+        kge_fb15k_237.py>`_.
+
+    Args:
+        num_nodes (int): The number of nodes/entities in the graph.
+        num_relations (int): The number of relations in the graph.
+        hidden_channels (int): The hidden embedding size.
+        margin (int, optional): The margin of the ranking loss.
+            (default: :obj:`1.0`)
+        p_norm (int, optional): The order embedding and distance normalization.
+            (default: :obj:`1.0`)
+        sparse (bool, optional): If set to :obj:`True`, gradients w.r.t. to the
+            embedding matrices will be sparse. (default: :obj:`False`)
+    """
+    def __init__(
+        self,
+        num_nodes: int,
+        num_relations: int,
+        hidden_channels: int,
+        margin: float = 1.0,
+        p_norm: float = 1.0,
+        sparse: bool = False,
+    ):
+        super().__init__(num_nodes, num_relations, hidden_channels, sparse)
+
+        self.p_norm = p_norm
+        self.margin = margin
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        bound = 6. / math.sqrt(self.hidden_channels)
+        torch.nn.init.uniform_(self.rel_emb.weight, -bound, bound)
+        F.normalize(self.rel_emb.weight.data, p=self.p_norm, dim=-1,
+                    out=self.rel_emb.weight.data)
+
+    def forward(
+        self,
+        X: Tensor,
+        head_index: Tensor,
+        rel_type: Tensor,
+        tail_index: Tensor,
+    ) -> Tensor:
+
+        head = X[head_index]
+        rel = self.rel_emb(rel_type)
+        tail = X[tail_index]
+
+        head = F.normalize(head, p=self.p_norm, dim=-1)
+        tail = F.normalize(tail, p=self.p_norm, dim=-1)
+
+        # Calculate *negative* TransE norm:
+        return -((head + rel) - tail).norm(p=self.p_norm, dim=-1)
 
     
-    def reset_parameter(self):
-
-        nn.init.xavier_uniform_(self.relations_embedding, gain=1.0)
-        
-        # Normalize after initialization
-        with torch.no_grad():
-            self.relations_embedding.data = F.normalize(self.relations_embedding.data, p=2, dim=1)
-
-        # Biases - initialize to small values
-        if self.b_init:
-            nn.init.zeros_(self.sbias)
-            nn.init.zeros_(self.pbias)
-            nn.init.zeros_(self.obias)
-
-
-    def forward(self,embedding, triplets):
-
-        s = embedding[triplets[:, 0]]  # Head entities
-        r = self.relations_embedding[triplets[:, 1]]  # Relations
-        o = embedding[triplets[:, 2]]  # Tail entities
-
-        s = torch.nn.functional.normalize(s, p=2, dim=1)
-        r = torch.nn.functional.normalize(r, p=2, dim=1)
-        o = torch.nn.functional.normalize(o, p=2, dim=1)
-
-        scores = torch.linalg.vector_norm(s + r - o, dim=1, ord=2)
-        
-        if self.b_init:
-            scores = scores + (self.sbias[triplets[:, 0]] + self.pbias[triplets[:, 1]] + self.obias[triplets[:, 2]])
-        scores = -scores  # Negate the scores for compatibility with loss functions
-        return scores
-    
-    def s_penalty(self, triples, nodes):
-        """ Compute Schlichtkrull L2 penalty for the decoder """
-
-        s_index, p_index, o_index = triples[:,0], triples[:,1], triples[:,2]
-
-        s, p, o = nodes[s_index, :], self.relations_embedding[p_index, :], nodes[o_index, :]
-
-        # Return mean of squared norms (not individual element squares)
-        # This is the standard L2 regularization
-        s_norm = torch.norm(s, p=2, dim=1).pow(2).mean()
-        p_norm = torch.norm(p, p=2, dim=1).pow(2).mean()
-        o_norm = torch.norm(o, p=2, dim=1).pow(2).mean()
-        
-        return (s_norm + p_norm + o_norm) / 3.0
-
-
-        

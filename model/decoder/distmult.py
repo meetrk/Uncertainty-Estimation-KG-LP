@@ -1,110 +1,69 @@
-from torch import nn
 import torch
-from torch.nn import Parameter
-from torch.nn.init import uniform_  
-from utils.initialiser import schlichtkrull_normal_
+import torch.nn.functional as F
+from torch import Tensor
+
+from model.decoder.kgemodel import KGEModel
+from sklearn.metrics import roc_auc_score
 
 
-# Base Decoder Class
-class Decoder(nn.Module):
-    """Base class for knowledge graph decoders."""
-    
-    def __init__(self, num_relations, embedding_dim):
-        super(Decoder, self).__init__()
-        self.num_relations = num_relations
-        self.embedding_dim = embedding_dim
-    
-    def forward(self, embedding, triplets):
-        """
-        Score triplets given entity embeddings.
-        
-        Args:
-            embedding: Entity embeddings [num_entities, embedding_dim]
-            triplets: Triplet indices [batch_size, 3] (head, relation, tail)
-        
-        Returns:
-            Scores for each triplet [batch_size]
-        """
-        raise NotImplementedError
-    
-    def regularization_loss(self):
-        """Return L2 regularization loss for decoder parameters."""
-        raise NotImplementedError
+class DistMult(KGEModel):
+    r"""The DistMult model from the `"Embedding Entities and Relations for
+    Learning and Inference in Knowledge Bases"
+    <https://arxiv.org/abs/1412.6575>`_ paper.
 
-class DistMultDecoder(Decoder):
+    :class:`DistMult` models relations as diagonal matrices, which simplifies
+    the bi-linear interaction between the head and tail entities to the score
+    function:
+
+    .. math::
+        d(h, r, t) = < \mathbf{e}_h,  \mathbf{e}_r, \mathbf{e}_t >
+
+    .. note::
+
+        For an example of using the :class:`DistMult` model, see
+        `examples/kge_fb15k_237.py
+        <https://github.com/pyg-team/pytorch_geometric/blob/master/examples/
+        kge_fb15k_237.py>`_.
+
+    Args:
+        num_nodes (int): The number of nodes/entities in the graph.
+        num_relations (int): The number of relations in the graph.
+        hidden_channels (int): The hidden embedding size.
+        margin (float, optional): The margin of the ranking loss.
+            (default: :obj:`1.0`)
+        sparse (bool, optional): If set to :obj:`True`, gradients w.r.t. to
+            the embedding matrices will be sparse. (default: :obj:`False`)
     """
-    DistMult decoder for knowledge graph link prediction.
-    
-    Implements the scoring function: score = sum(head * relation * tail)
-    """
-    
-    def __init__(self, num_relations,
-                embedding_dim,
-                num_nodes,
-                w_gain=False,
-                b_init=True,
-                ):
-        super(DistMultDecoder, self).__init__(num_relations, embedding_dim)
-        self.w_gain = w_gain
-        self.b_init = b_init
+    def __init__(
+        self,
+        num_nodes: int,
+        num_relations: int,
+        hidden_channels: int,
+        margin: float = 1.0,
+        sparse: bool = False,
+    ):
+        super().__init__(num_nodes, num_relations, hidden_channels, sparse)
 
-        # Create weights & biases
-        self.relations_embedding = nn.Parameter(torch.FloatTensor(num_relations, embedding_dim))
-        if b_init:
-            self.sbias = Parameter(torch.FloatTensor(num_nodes))
-            self.obias = Parameter(torch.FloatTensor(num_nodes))
-            self.pbias = Parameter(torch.FloatTensor(num_relations))
-        else:
-            self.register_parameter('sbias', None)
-            self.register_parameter('obias', None)
-            self.register_parameter('pbias', None)
-
+        self.margin = margin
 
         self.reset_parameters()
-    
+
     def reset_parameters(self):
-        
-        if self.w_gain:
-            gain = nn.init.calculate_gain('relu')
-            schlichtkrull_normal_(self.relations_embedding, shape=self.relations_embedding.shape, gain=gain)
-        else:
-            schlichtkrull_normal_(self.relations_embedding, shape=self.relations_embedding.shape)
+        torch.nn.init.xavier_uniform_(self.rel_emb.weight)
 
-        # Biases
-        if self.b_init:
-            init = uniform_
-            init(self.sbias)
-            init(self.pbias)
-            init(self.obias)
-    
-    def forward(self, embedding, triplets):
-        """
-        Compute DistMult scores.
-        
-        Args:
-            embedding: Entity embeddings from encoder [num_entities, embedding_dim]
-            triplets: [batch_size, 3] containing (head_idx, relation_idx, tail_idx)
-        
-        Returns:
-            Scores [batch_size]
-        """
-        s = embedding[triplets[:, 0]]  # Head entities
-        r = self.relations_embedding[triplets[:, 1]]  # Relations
-        o = embedding[triplets[:, 2]]  # Tail entities
-    
-        scores = torch.sum(s * r * o, dim=1)
+    def forward(
+        self,
+        X: Tensor,
+        head_index: Tensor,
+        rel_type: Tensor,
+        tail_index: Tensor,
+    ) -> Tensor:
 
-        if self.b_init:
-            scores = scores + (self.sbias[triplets[:, 0]] + self.pbias[triplets[:, 1]] + self.obias[triplets[:, 2]])
 
-        return scores
-    
-    def s_penalty(self, triples, nodes):
-        """ Compute Schlichtkrull L2 penalty for the decoder """
+        head = X[head_index]
+        rel = self.rel_emb(rel_type)
+        tail = X[tail_index]
 
-        s_index, p_index, o_index = triples[:,0],triples[:,1],triples[:,2]
+        return (head * rel * tail).sum(dim=-1)
 
-        s, p, o = nodes[s_index, :], self.relations_embedding[p_index, :], nodes[o_index, :]
-
-        return s.pow(2).mean() + p.pow(2).mean() + o.pow(2).mean()
     
