@@ -34,6 +34,7 @@ class RGCNLayer(MessagePassing):
         self.reset_parameters()
     
     def reset_parameters(self):
+
         # Glorot/Xavier-style initialization for basis and attention
         bound = math.sqrt(6.0 / (self.in_channels + self.out_channels))
         torch.nn.init.uniform_(self.basis, -bound, bound)
@@ -72,6 +73,7 @@ class RGCNLayer(MessagePassing):
         return out
 
     def message(self, x_j, relation):
+        
         w = torch.matmul(self.att, self.basis.view(self.num_bases, -1))
         w = w.view(self.num_relations, self.in_channels, self.out_channels)
         return torch.matmul(x_j, w[relation])

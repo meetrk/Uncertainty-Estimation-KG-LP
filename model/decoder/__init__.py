@@ -1,4 +1,4 @@
-from .distmult import DistMultDecoder,Decoder
+from .distmult import DistMult
 from .transe import TransE
 
-__all__ = ['DistMultDecoder', 'TransE', 'Decoder']
+__all__ = ['DistMult', 'TransE']

@@ -140,22 +140,29 @@ def edge_neighborhood(train_triples, sample_size=30000, num_nodes=None):
 
 
 
-def generate_batch_triples(triples, num_nodes, config, device, sampling="sample"):
+def generate_batch_triples(triples, num_nodes, config, device, mode, sampling="sample",):
 
-    """ Generate batch of positive and negative triples for training """
+    """ Generate batch for training """
+    if mode == "train":
+        sample_size = config['sampling']['batch_size'] 
+    elif mode == "eval":
+        sample_size = triples.size(0)
+    
     if sampling == "edge-neighborhood":
-        positives = edge_neighborhood(triples, sample_size=config['sampling']['batch_size'], num_nodes=num_nodes)
-        positives = torch.stack(positives).to(device) # triples: (batch_size, negative_sampling_ratio, 3)
+        batch = edge_neighborhood(triples, sample_size=sample_size, num_nodes=num_nodes)
+        # Stack list of tensors into a single tensor
+        batch = torch.stack(batch).to(device)
     elif sampling == "sample":
-        positives = sample(range(triples.size(0)), k=config['sampling']['batch_size'])
-        positives = triples[positives].to(device)
+        indices = sample(range(triples.size(0)), k=sample_size)
+        batch = triples[indices].to(device)
+    elif sampling == "full":
+        batch = triples.to(device)
     else:
         raise ValueError(f"Unknown sampling method: {sampling}")
 
-    negatives = positives.clone()[:, None, :].expand(config['sampling']['batch_size'], config['sampling']['negative_sampling_ratio'], 3).contiguous()     
-    negatives = negative_sampling(negatives, num_nodes, config['sampling']['head_corrupt_prob'], device=device) # triples: (batch_size * negative_sampling_ratio, 3)
-    batch_idx = torch.cat([positives, negatives], dim=0)
-
-    return positives, negatives, batch_idx        
-  
+    # Ensure batch has shape [batch_size, 3]
+    if batch.dim() != 2 or batch.size(1) != 3:
+        raise ValueError(f"Expected batch shape [batch_size, 3], got {batch.shape}")
+    
+    return batch
 

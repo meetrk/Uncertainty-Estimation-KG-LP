@@ -50,60 +50,60 @@ class Pipeline:
         self.logger.info(f"Starting training for {max_epochs} epochs")
         
         tqdm_range = range(1, max_epochs + 1)
-        tqdm_range = tqdm(tqdm_range, desc="Training", unit="batch")
+        tqdm_range = tqdm(tqdm_range, desc="Training", unit="batch")        
 
         for epoch in tqdm_range:
             self.epoch = epoch
             
             # Training
             epoch_loss = 0.0
-            positives, negatives, batch_idx = generate_batch_triples(self.data.train_triplets, self.data.num_nodes, self.train_config, self.device, sampling=self.train_config['sampling']['method'])
 
-            loss = self.train(
-                edge_label_index=batch_idx[:, :2].T,
-                edge_label_type=batch_idx[:, 1],
-                edge_label= torch.cat([
-                    torch.ones(positives.size(0), dtype=torch.float, device=self.device), 
-                    torch.zeros(negatives.size(0), dtype=torch.float, device=self.device)
-                ], dim=0)
+            triple_batch = generate_batch_triples(self.data.train_triplets, self.data.num_nodes, self.train_config, self.device, mode="train", sampling=self.train_config['sampling']['method'])
+        
+            loss, auc_score = self.train(
+                triples=triple_batch
             )
             epoch_loss += loss.item()
-            self.training_history['train_loss'].append(epoch_loss)
+
+            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": epoch_loss, "auc_score": auc_score})
+
             
             # Log training loss to TensorBoard
             self.writer.add_scalar('Loss/Train', epoch_loss, epoch)
+            self.writer.add_scalar('AUC SCORE/Train', auc_score, epoch)
             
             # Log gradients periodically
             if epoch % 10 == 0:  # Log gradients every 10 epochs
                 self.log_model_gradients(epoch)
-            
-            self.logger.info(f"Epoch {epoch} completed. Average loss: {epoch_loss:.4f}")
+
+            self.logger.info(f"Epoch {epoch} completed. Loss: {epoch_loss:.4f}")
+            self.logger.info(f"Epoch {epoch} completed. AUC Score: {auc_score:.4f}")
 
             # Evaluation
             if epoch % eval_frequency == 0:
     
-                # metrics = evaluate_distmult(
-                #     triples=self.data.valid_triplets,
-                #     entity_embeddings=self.model.entity_embedding.detach().cpu().numpy(),
-                #     relation_embeddings=self.model.decoder.relations_embedding.detach().cpu().numpy(),
-                #     known_triples= torch.cat([self.data.train_triplets, self.data.valid_triplets, self.data.test_triplets],dim=0),
-                #     ks=[1,3,10]
-                # )
-                # self.writer.add_scalar("LP/MRR", float(metrics["MRR"]), epoch)
-                # self.writer.add_scalar("LP/Hits@1", float(metrics["Hits@K"][1]), epoch)
-                # self.writer.add_scalar("LP/Hits@3", float(metrics["Hits@K"][3]), epoch)
-                # self.writer.add_scalar("LP/Hits@10", float(metrics["Hits@K"][10]), epoch)
-                # self.logger.info(f"Evaluation metrics at epoch {epoch}: {metrics}")
+                metrics = evaluate_mrr_hits(
+                    entity_emb=self.model.entity_embedding.detach().cpu().numpy(),
+                    relation_emb=self.model.decoder.rel_emb.weight.detach().cpu().numpy(),
+                    test_triples=self.data.valid_triplets,
+                    known_triples= self.data.train_triplets
+                )
+                self.writer.add_scalar("LP/MRR", float(metrics["mrr"]), epoch)
+                self.writer.add_scalar("LP/Hits@1", float(metrics["hits@1"]), epoch)
+                self.writer.add_scalar("LP/Hits@3", float(metrics["hits@3"]), epoch)
+                self.writer.add_scalar("LP/Hits@10", float(metrics["hits@10"]), epoch)
+                self.logger.info(f"Evaluation metrics at epoch {epoch}: {metrics}")
 
                 
-                eval_metrics = self.evaluate_loss()
-                self.training_history['eval_metrics'].append(eval_metrics)
+                eval_loss_value,eval_auc_score = self.evaluate_loss()
+
+                self.training_history['eval_metrics'].append({"epoch":epoch,"metrics":metrics,"eval_loss":eval_loss_value,"eval_auc_score":eval_auc_score})
                 
                 # Log evaluation loss to TensorBoard
-                eval_loss_value = eval_metrics.item() if isinstance(eval_metrics, torch.Tensor) else eval_metrics
                 self.writer.add_scalar('Loss/Validation', eval_loss_value, epoch)
-                
-                self.logger.info(f"Evaluation metrics at epoch {epoch}: {eval_metrics}")
+                self.writer.add_scalar('AUC SCORE/Validation', eval_auc_score, epoch)
+                self.logger.info(f"Evaluation Loss at epoch {epoch}: {eval_loss_value}")
+                self.logger.info(f"Evaluation AUC Score at epoch {epoch}: {eval_auc_score}")
                 
             
             # Save checkpoint
@@ -117,30 +117,29 @@ class Pipeline:
 
 
 
-    def train(self, edge_label_index, edge_label_type, edge_label):
+    def train(self, triples):
         """
         Train the model on a single batch.
         """
 
         self.model.train()
         self.optimizer.zero_grad()
-        
+
+        edge_label_index, edge_label_type = get_edges(triples)
+       
         # Move data to device
         edge_label_index = edge_label_index.to(self.device)
         edge_label_type = edge_label_type.to(self.device)
-        edge_label = edge_label.to(self.device)
 
-        score, penalty = self.model(edge_label_index, edge_label_type,self.model_config) ## generating embedding only for nodes in the batch
 
-        # Compute loss
-        loss = F.binary_cross_entropy_with_logits(score, edge_label)
-        loss  = loss + (self.model_config['decoder']['l2_penalty'] * penalty)
+        pred_logits, loss, roc_auc_score = self.model(edge_label_index, edge_label_type) 
 
         # Backward pass
         loss.backward()
 
         self.optimizer.step()
-        return loss
+
+        return loss, roc_auc_score
 
     
     def log_model_gradients(self, epoch):
@@ -189,18 +188,13 @@ class Pipeline:
         self.model.eval()
         with torch.no_grad():
 
-            positives, negatives, val_triplets = generate_batch_triples(self.data.valid_triplets, self.data.num_nodes, self.train_config, self.device, sampling=self.train_config['sampling']['method'])
+            val_triplets = generate_batch_triples(self.data.valid_triplets, self.data.num_nodes, self.train_config, self.device,mode="eval", sampling=self.train_config['sampling']['method'])
 
             val_edge_index,val_edge_labels = get_edges(triplets=val_triplets)
 
-            score, _ = self.model(val_edge_index, val_edge_labels,self.model_config)
+            score,val_loss,val_roc_auc_score = self.model(val_edge_index, val_edge_labels)
 
-            val_edge_labels=torch.cat([torch.ones(positives.size(0), device=self.device), 
-                                      torch.zeros(negatives.size(0), device=self.device)])
-            # Compute loss
-            val_loss = F.binary_cross_entropy_with_logits(score, val_edge_labels)
-
-            return val_loss
+            return val_loss,val_roc_auc_score
         
     
     def save_checkpoint(self, epoch):
@@ -237,119 +231,129 @@ class Pipeline:
         if hasattr(self, 'writer'):
             self.writer.close()
 
-    
 
 import numpy as np
-from collections import defaultdict
-from contextlib import nullcontext
+import torch
+from typing import Iterable, Tuple, Set, List, Dict, Union
 from tqdm import tqdm
 
-def evaluate_distmult(
-    triples,
-    entity_embeddings,
-    relation_embeddings,
-    known_triples=None,
-    ks=(1, 3, 10),
-    filtered_index=None,
-):
+Triple = Tuple[int, int, int]
+ArrayLike = Union[np.ndarray, torch.Tensor]
+
+
+def _to_numpy(x: ArrayLike) -> np.ndarray:
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _to_triple_list(triples: Union[ArrayLike, Iterable[Triple]]) -> List[Triple]:
+    if isinstance(triples, torch.Tensor):
+        triples = triples.detach().cpu().numpy()
+    if isinstance(triples, np.ndarray):
+        return [tuple(map(int, t)) for t in triples]
+    return [tuple(map(int, t)) for t in triples]
+
+
+def _distmult_scores_replace_tail(entity_emb: np.ndarray, relation_emb: np.ndarray,
+                                   s: int, p: int) -> np.ndarray:
+    v = entity_emb[s] * relation_emb[p]
+    return entity_emb @ v
+
+
+def _distmult_scores_replace_head(entity_emb: np.ndarray, relation_emb: np.ndarray,
+                                   p: int, o: int) -> np.ndarray:
+    v = entity_emb[o] * relation_emb[p]
+    return entity_emb @ v
+
+
+def evaluate_mrr_hits(entity_emb: ArrayLike,
+                      relation_emb: ArrayLike,
+                      test_triples: Union[ArrayLike, Iterable[Triple]],
+                      known_triples: Union[ArrayLike, Iterable[Triple]],
+                      hits_k: Tuple[int, ...] = (1, 3, 10),
+                      filter_true: bool = True,
+                      batch_size: int = 128,
+                      verbose: bool = True) -> Dict[str, float]:
+    """Evaluate MRR and Hits@k for DistMult link prediction (filtered setting).
+
+    - Compatible with both PyTorch tensors and NumPy arrays.
+    - Uses tqdm progress bar for tracking progress.
+    - More efficient filtering via precomputed mapping.
     """
-    Filtered MRR and Hits@K for link prediction with DistMult.
 
-    Parameters
-    ----------
-    triples : iterable[tuple[int,int,int]]
-    entity_embeddings : (num_entities, d) array-like (NumPy recommended)
-    relation_embeddings : (num_relations, d) array-like
-    known_triples : set[(h,r,t)] | None
-    ks : iterable[int]
-    filtered_index : optional dict with two maps to speed filtering:
-        {
-          'hr_to_t': dict[(h,r)] -> np.ndarray of true tails (including the eval t),
-          'rt_to_h': dict[(r,t)] -> np.ndarray of true heads (including the eval h),
-        }
-        If not provided but known_triples is, it will be built.
 
-    Returns
-    -------
-    {"MRR": float, "Hits@K": {K: float}}
-    """
-    # Ensure NumPy arrays
-    E = np.asarray(entity_embeddings, dtype=np.float32)
-    R = np.asarray(relation_embeddings, dtype=np.float32)
-    N, d = E.shape
-    assert R.shape[1] == d, "Entity and relation embeddings must share dimension d"
+    entity_emb = _to_numpy(entity_emb)
+    relation_emb = _to_numpy(relation_emb)
+    n_entities = entity_emb.shape[0]
 
-    # Precompute ET for fast tail scoring
-    ET = E.T  # (d, N)
+    known_triples_list = _to_triple_list(known_triples)
+    test_triples_list = _to_triple_list(test_triples)
 
-    # Build filtered index if needed
-    if known_triples is not None and filtered_index is None:
-        hr_to_t = defaultdict(list)
-        rt_to_h = defaultdict(list)
-        for (hh, rr, tt) in known_triples:
-            hr_to_t[(hh, rr)].append(tt)
-            rt_to_h[(rr, tt)].append(hh)
-        # Convert lists to arrays for fast masking
-        filtered_index = {
-            "hr_to_t": {k: np.array(v, dtype=np.int64) for k, v in hr_to_t.items()},
-            "rt_to_h": {k: np.array(v, dtype=np.int64) for k, v in rt_to_h.items()},
-        }
+    # Precompute lookup maps for filtering
+    known_sp = {}
+    known_po = {}
+    if filter_true:
+        for (s, p, o) in known_triples_list:
+            known_sp.setdefault((s, p), set()).add(o)
+            known_po.setdefault((p, o), set()).add(s)
 
-    ks = tuple(int(k) for k in ks)
-    rr_sum = 0.0
-    hits_counts = {K: 0.0 for K in ks}
+    reciprocal_ranks = []
+    hits_counts = {k: 0 for k in hits_k}
+    total = 0
 
-    # Iterate triples
-    for (h, r, t) in tqdm(triples, desc="Evaluating", unit="triple"):
-        # Tail ranking (h, r, ?): scores for all t'
-        # DistMult => (E[h] * R[r]) @ E.T
-        hr = E[h] * R[r]                    # (d,)
-        scores_tail = hr @ ET               # (N,)
+    # tqdm progress bar
+    iterator = tqdm(range(0, len(test_triples_list), batch_size),
+                    disable=not verbose,
+                    desc="Evaluating",
+                    unit="batch")
 
-        # Filter other true tails for (h,r)
-        if known_triples is not None:
-            idx = filtered_index["hr_to_t"].get((h, r), None)
-            if idx is not None and idx.size > 0:
-                # mask out all true tails except the target t
-                # set to -inf so they don't affect ranking
-                mask_idx = idx[idx != t]
-                if mask_idx.size > 0:
-                    scores_tail[mask_idx] = -np.inf
+    for i in iterator:
+        batch = test_triples_list[i:i + batch_size]
 
-        # Rank of true t (higher is better); use competition ranking
-        # Rank = 1 + count of strictly greater scores
-        st = scores_tail[t]
-        # Protect against NaN/inf
-        if not np.isfinite(st):
-            st = -np.inf
-        rank_t = int(np.sum(scores_tail > st)) + 1
+        for (s, p, o) in batch:
+            # (s, p, ?)
+            v_tail = entity_emb[s] * relation_emb[p]
+            scores_tail = entity_emb @ v_tail
 
-        # Head ranking (?, r, t): scores for all h'
-        rt = R[r] * E[t]                    # (d,)
-        scores_head = E @ rt                # (N,)
+            if filter_true and (s, p) in known_sp:
+                for cand in known_sp[(s, p)]:
+                    if cand != o:
+                        scores_tail[cand] = -np.inf
 
-        if known_triples is not None:
-            idx = filtered_index["rt_to_h"].get((r, t), None)
-            if idx is not None and idx.size > 0:
-                mask_idx = idx[idx != h]
-                if mask_idx.size > 0:
-                    scores_head[mask_idx] = -np.inf
+            true_score = scores_tail[o]
+            better = np.sum(scores_tail > true_score)
+            equal = np.sum(scores_tail == true_score)
+            rank_tail = 1 + better + (equal - 1) / 2.0
+            reciprocal_ranks.append(1.0 / rank_tail)
+            for k in hits_k:
+                hits_counts[k] += rank_tail <= k
 
-        sh = scores_head[h]
-        if not np.isfinite(sh):
-            sh = -np.inf
-        rank_h = int(np.sum(scores_head > sh)) + 1
+            total += 1
 
-        rr = 0.5 * (1.0 / rank_t + 1.0 / rank_h)
-        rr_sum += rr
+            # (?, p, o)
+        
+            v_head = entity_emb[o] * relation_emb[p]
+            scores_head = entity_emb @ v_head
 
-        for K in ks:
-            hits_counts[K] += 0.5 * ((rank_t <= K) + (rank_h <= K))
+            if filter_true and (p, o) in known_po:
+                for cand in known_po[(p, o)]:
+                    if cand != s:
+                        scores_head[cand] = -np.inf
 
-    n = len(triples) if hasattr(triples, "__len__") else int(getattr(triples, "shape", [0])[0])
-    if n == 0:
-        return {"MRR": 0.0, "Hits@K": {K: 0.0 for K in ks}}
+            true_score = scores_head[s]
+            better = np.sum(scores_head > true_score)
+            equal = np.sum(scores_head == true_score)
+            rank_head = 1 + better + (equal - 1) / 2.0
 
-    mrr = rr_sum / n
-    hits_at_k = {K: hits_counts[K] / n for K in ks}
-    return {"MRR": float(mrr), "Hits@K": {K: float(v) for K, v in hits_at_k.items()}}
+            for k in hits_k:
+                hits_counts[k] += rank_head <= k
+
+            total += 1
+
+    mrr = float(np.mean(reciprocal_ranks)) if reciprocal_ranks else 0.0
+    metrics = {'mrr': mrr}
+    for k in hits_k:
+        metrics[f'hits@{k}'] = float(hits_counts[k] / total) if total > 0 else 0.0
+
+    return metrics

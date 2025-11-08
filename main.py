@@ -5,10 +5,9 @@ from pathlib import Path
 from utils.config_loader import ConfigLoader
 from utils.utils import setup_and_load_dataset
 from model.encoder.model import RGCN
-from model.decoder.distmult import DistMultDecoder
+from model.decoder.distmult import DistMult
 from model.decoder.transe import TransE
 from model.trainer.pipeline import Pipeline
-import torch
 
 def setup_logging(log_level: str = "INFO") -> None:
     """Setup logging configuration."""
@@ -82,22 +81,20 @@ def main():
 
     # Initialize decoder
     if config_loader.get_section('model')['decoder']['type'] == 'DistMult':
-        decoder = DistMultDecoder
+        decoder = DistMult
     elif config_loader.get_section('model')['decoder']['type'] == 'TransE':
         decoder = TransE
     else:
         raise ValueError("Unsupported decoder type specified")
 
     decoder = decoder(
-        num_relations=data.num_relations,
-        embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
         num_nodes=num_nodes,
-        w_gain=config_loader.get_section('model')['decoder']['w_gain'],
-        b_init=config_loader.get_section('model')['decoder']['b_init'],
+        num_relations=data.num_relations,
+        hidden_channels=config_loader.get_section('model')['encoder']['embedding_dim'],
     )
         # Initialize the RGCN model
     model = RGCN(
-        num_entities=num_nodes,
+        num_nodes=num_nodes,
         num_relations=data.num_relations,
         embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
         num_bases=config_loader.get_section('model')['encoder']['num_bases'],
@@ -107,7 +104,7 @@ def main():
     )
     
     logger.info(f"Model architecture:\n{model}")
-    
+
     # Initialize trainer
     pipeline = Pipeline(
         model=model,
@@ -115,7 +112,7 @@ def main():
         config=config_loader,
         logger=logger
     )
-    
+
     # Start training
     logger.info("Starting training process...")
     training_results = pipeline.start_pipeline()
@@ -123,7 +120,7 @@ def main():
     
     logger.info(f"Training results: {training_results}")
     # pipeline.plot_training_history()
-        
+
     # except FileNotFoundError as e:
     #     logger.error(f"File not found: {e}")
     #     sys.exit(1)
