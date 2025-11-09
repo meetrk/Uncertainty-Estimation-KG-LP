@@ -1,11 +1,10 @@
-# Core dependencies
-torch>=1.9.0
-torch-geometric>=2.0.0
-numpy>=1.20.0
-PyYAML>=5.4.0
+# Core dependencies for Knowledge Graph Link Prediction with RGCN
+torch>=2.0.0
+torch-geometric>=2.7.0
+numpy>=1.26.0
+scikit-learn>=1.7.0
+pyyaml>=6.0.0
+tqdm>=4.66.0
 
-# Development dependencies
-pytest>=6.0.0
-black>=21.0.0
-flake8>=3.8.0
-mypy>=0.900
+# For TensorBoard logging
+tensorboard>=2.20.0
