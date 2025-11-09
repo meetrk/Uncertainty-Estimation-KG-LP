@@ -51,14 +51,19 @@ class RGCNLayer(MessagePassing):
 
         if self.w_init == 'schlichtkrull-normal':
             schlichtkrull_normal_(self.basis, (self.num_bases, self.in_channels, self.out_channels), gain)
+            schlichtkrull_normal_(self.att, (self.num_relations, self.num_bases), gain)
         elif self.w_init == 'schlichtkrull-uniform':
             schlichtkrull_uniform_(self.basis, gain)
+            schlichtkrull_uniform_(self.att, gain)
         elif self.w_init == "uniform":
             torch.nn.init.uniform_(self.basis, -gain, gain)
+            torch.nn.init.uniform_(self.att, -gain, gain)
         elif self.w_init == "normal":
             torch.nn.init.normal_(self.basis, 0.0, gain)
+            torch.nn.init.normal_(self.att, 0.0, gain)
         else:
             torch.nn.init.xavier_uniform_(self.basis, gain=gain)
+            torch.nn.init.xavier_uniform_(self.att, gain=gain)
       
         # Initialize root weight
         if self.root is not None:
