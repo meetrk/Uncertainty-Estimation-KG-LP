@@ -84,14 +84,11 @@ class RGCN(nn.Module):
         """
 
         x = self.entity_embedding + self.entity_embedding_bias
-        print("embedding stats:", torch.isnan(x).sum().item(), x.min().item(), x.max().item())
         x = torch.nn.functional.relu(x)
-        print("after ReLU:", torch.isnan(x).sum().item())
         x = self.conv1(x, edge_index, edge_type)
-        print("after conv1:", torch.isnan(x).sum().item(), x.min().item(), x.max().item())
         x = F.relu(x)
         x = self.conv2(x, edge_index, edge_type)
-        print("after conv2:", torch.isnan(x).sum().item(), x.min().item(), x.max().item())
+
         triples = get_triples(edge_index=edge_index,edge_type=edge_type)
 
         pred_logits = self.decoder(x, triples[:,0], triples[:,1], triples[:,2])
@@ -112,7 +109,6 @@ class RGCN(nn.Module):
 
         self.eval()
         print("Starting evaluation...")
-        print(f"Batch size: {batch_size}, Top-K: {k}")
         return self.decoder.test(
             self.entity_embedding + self.entity_embedding_bias,
             head_index,

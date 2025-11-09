@@ -67,8 +67,7 @@ class KGEModel(torch.nn.Module):
 
         pos_score = self(X, head_index, rel_type, tail_index)
         neg_score = self(X, *self.random_sample(head_index, rel_type, tail_index))
-        print("pos_score stats:", torch.min(pos_score).item(), torch.max(pos_score).item(), torch.isnan(pos_score).sum().item())
-        print("neg_score stats:", torch.min(neg_score).item(), torch.max(neg_score).item(), torch.isnan(neg_score).sum().item())
+
         scores = torch.cat([pos_score,neg_score])
         labels = torch.cat([
                 torch.ones(pos_score.size()),
