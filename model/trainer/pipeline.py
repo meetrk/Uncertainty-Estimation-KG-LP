@@ -82,9 +82,9 @@ class Pipeline:
             if epoch % eval_frequency == 0:
 
                 mean_rank, mrr, hits_at_k = self.model.test(
-                    head_index=self.data.valid_triplets[:,0],
-                    rel_type=self.data.valid_triplets[:,1],
-                    tail_index=self.data.valid_triplets[:,2],
+                    head_index=self.data.train_triplets[:,0],
+                    rel_type=self.data.train_triplets[:,1],
+                    tail_index=self.data.train_triplets[:,2],
                     batch_size=256,
                     k=10
                 )
@@ -96,7 +96,7 @@ class Pipeline:
                 # self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_auc_score})
 
 
-                eval_loss_value, eval_auc_score = self.evaluate_loss()
+                eval_loss_value, eval_auc_score = self.validation_loss()
 
                 self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_auc_score})
                 
@@ -182,7 +182,7 @@ class Pipeline:
                 self.writer.add_scalar(f'Hyperparameters/{key}', value, 0)
 
     
-    def evaluate_loss(self):
+    def validation_loss(self):
         """
         Evaluate average loss on a validation/test split produced by RandomLinkSplit.
         """
