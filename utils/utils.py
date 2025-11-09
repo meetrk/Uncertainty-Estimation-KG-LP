@@ -140,7 +140,7 @@ def edge_neighborhood(train_triples, sample_size=30000, num_nodes=None):
 
 
 
-def generate_batch_triples(triples, num_nodes, config, device, mode, sampling="sample",):
+def generate_batch_triples(triples, num_nodes, config, mode, sampling="sample",):
 
     """ Generate batch for training """
     if mode == "train":
@@ -153,12 +153,12 @@ def generate_batch_triples(triples, num_nodes, config, device, mode, sampling="s
     if sampling == "edge-neighborhood":
         batch = edge_neighborhood(triples, sample_size=sample_size, num_nodes=num_nodes)
         # Stack list of tensors into a single tensor
-        batch = torch.stack(batch).to(device)
+        batch = torch.stack(batch)
     elif sampling == "sample":
         indices = sample(range(triples.size(0)), k=sample_size)
-        batch = triples[indices].to(device)
+        batch = triples[indices]
     elif sampling == "full":
-        batch = triples.to(device)
+        batch = triples
     else:
         raise ValueError(f"Unknown sampling method: {sampling}")
 

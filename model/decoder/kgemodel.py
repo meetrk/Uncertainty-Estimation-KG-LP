@@ -136,9 +136,12 @@ class KGEModel(torch.nn.Module):
             scores = []
             tail_indices = torch.arange(self.num_nodes, device=t.device)
             for ts in tail_indices.split(batch_size):
-                scores.append(self(X,h.expand_as(ts), r.expand_as(ts), ts))
-            rank = int((torch.cat(scores).argsort(
-                descending=True) == t).nonzero().view(-1))
+                scores.append(self(X, h.expand_as(ts), r.expand_as(ts), ts))
+            
+            all_scores = torch.cat(scores)
+            # Fix: get the index of the true tail entity in the sorted scores
+            rank = int((all_scores.argsort(descending=True) == t).nonzero().view(-1)[0])
+            
             mean_ranks.append(rank)
             reciprocal_ranks.append(1 / (rank + 1))
             hits_at_k.append(rank < k)

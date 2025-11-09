@@ -57,7 +57,7 @@ class Pipeline:
             # Training
             epoch_loss = 0.0
 
-            triple_batch = generate_batch_triples(self.data.train_triplets, self.data.num_nodes, self.train_config, self.device, mode="train", sampling=self.train_config['sampling']['method'])
+            triple_batch = generate_batch_triples(self.data.train_triplets, self.data.num_nodes, self.train_config, mode="train", sampling=self.train_config['sampling']['method'])
         
             loss, auc_score = self.train(
                 triples=triple_batch
@@ -93,7 +93,7 @@ class Pipeline:
                 self.writer.add_scalar("LP/MRR", float(mrr), epoch)
                 self.writer.add_scalar("LP/Hits@10", float(hits_at_k), epoch)
                 self.writer.add_scalar("LP/Mean_Rank", float(mean_rank), epoch)
-                self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_auc_score})
+                # self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_auc_score})
 
 
                 eval_loss_value, eval_auc_score = self.evaluate_loss()
@@ -189,7 +189,7 @@ class Pipeline:
         self.model.eval()
         with torch.no_grad():
 
-            val_triplets = generate_batch_triples(self.data.valid_triplets, self.data.num_nodes, self.train_config, self.device,mode="eval", sampling=self.train_config['sampling']['method'])
+            val_triplets = generate_batch_triples(self.data.valid_triplets, self.data.num_nodes, self.train_config,mode="eval", sampling=self.train_config['sampling']['method'])
 
             val_edge_index,val_edge_labels = get_edges(triplets=val_triplets)
 

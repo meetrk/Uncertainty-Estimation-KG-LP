@@ -65,6 +65,7 @@ def main():
     config_loader = ConfigLoader(str(config_path))
     dataset_config = config_loader.get_section('dataset') 
     training_config = config_loader.get_section('training')
+    model_config = config_loader.get_section('model')
     # Load dataset and generate a PyG data object
     data = setup_and_load_dataset(dataset_config, logger)
     print(data)
@@ -92,17 +93,20 @@ def main():
         num_relations=data.num_relations,
         hidden_channels=config_loader.get_section('model')['encoder']['embedding_dim'],
     )
-        # Initialize the RGCN model
+    logger.info(f"Decoder initialized: {decoder}")
+    logger.info(f"Decoder parameters count: {sum(p.numel() for p in decoder.parameters())}")
+
     model = RGCN(
         num_nodes=num_nodes,
         num_relations=data.num_relations,
-        embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
-        num_bases=config_loader.get_section('model')['encoder']['num_bases'],
-        dropout=config_loader.get_section('model')['encoder']['dropout'],
-        hidden_layer_size=config_loader.get_section('model')['encoder']['hidden_layer_size'],
+        model_config=model_config,
         decoder=decoder
     )
-    
+    logger.info("Model initialized successfully.")
+    logger.info(f"Model parameters count: {sum(p.numel() for p in model.parameters())}")
+
+    logger.info("Total model parameters: {}".format(sum(p.numel() for p in model.parameters())))
+
     logger.info(f"Model architecture:\n{model}")
 
     # Initialize trainer

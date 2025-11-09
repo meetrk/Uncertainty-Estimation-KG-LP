@@ -2,7 +2,6 @@ dataset:
   name: FB15k-237
   path: ./dataset/fb15k237
 
-
 model:
   encoder:
     type: RGCN
@@ -10,18 +9,20 @@ model:
     embedding_dim: 200
     num_layers: 2
     dropout: 0.2
-    num_bases : 30
+    num_bases : 5
   decoder:
     type: DistMult
-    w_init: xavier_uniform
-    w_gain: true
-    b_init: true
+    l2_penalty_type: schlichtkrull-l2
+    l2_penalty : 0
+    w_gain: false
+    b_init: false
   
 training:
-  epochs: 200
+  epochs: 100
   sampling:
-    batch_size: 1024
-    negative_sampling_ratio: 5
+    batch_size: 2048
+    method: sample
+    negative_sampling_ratio: 1
     head_corrupt_prob: 0.5
   optimiser:
     learning_rate: 0.01
@@ -29,6 +30,6 @@ training:
   evaluation_frequency: 20
   save_frequency: 100
   evaluation:
-    batch_size: 64
     verbose: true
     filter_candidates: true
+    hits_at_k: [1, 3, 10]

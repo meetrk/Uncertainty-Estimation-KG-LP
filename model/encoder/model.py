@@ -11,8 +11,7 @@ from torch import Tensor
 
 
 class RGCN(nn.Module):
-    def __init__(self, num_nodes, hidden_layer_size, num_relations, num_bases, dropout, 
-                 embedding_dim=100, decoder=None):
+    def __init__(self, num_nodes, num_relations, model_config, decoder=None,):
         """
         RGCN encoder with modular decoder.
         
@@ -26,22 +25,28 @@ class RGCN(nn.Module):
             decoder: Decoder module (if None, defaults to DistMultDecoder)
         """
         super(RGCN, self).__init__()
-        
+
+        self.embedding_dim = model_config['encoder']['embedding_dim']
+        self.num_bases = model_config['encoder']['num_bases']
+        self.dropout_ratio = model_config['encoder']['dropout']
+        self.hidden_layer_size = model_config['encoder']['hidden_layer_size']
         self.num_nodes = num_nodes
         self.num_relations = num_relations
-        self.embedding_dim = embedding_dim
+        self.w_init = model_config['encoder'].get('w_init', None)
+        self.w_gain = model_config['encoder'].get('w_gain', False)
+        self.b_init = model_config['encoder'].get('b_init', False)
+
         
         # Entity embeddings (encoder)
-        self.entity_embedding = nn.Parameter(torch.FloatTensor(num_nodes, embedding_dim))
+        self.entity_embedding = nn.Parameter(torch.FloatTensor(num_nodes, self.embedding_dim))
         nn.init.xavier_uniform_(self.entity_embedding)
-        self.entity_embedding_bias = nn.Parameter(torch.zeros(1, embedding_dim))
+        self.entity_embedding_bias = nn.Parameter(torch.zeros(1, self.embedding_dim))
         
         # RGCN layers
         self.conv1 = RGCNLayer(
-            embedding_dim, hidden_layer_size, num_relations * 2, num_bases=num_bases)
+            self.embedding_dim, self.hidden_layer_size, self.num_relations * 2, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
         self.conv2 = RGCNLayer(
-            hidden_layer_size, embedding_dim, num_relations * 2, num_bases=num_bases)
-        
+            self.hidden_layer_size, self.embedding_dim, self.num_relations * 2, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
         # self.conv1 = RGCNConv(
         #     in_channels=embedding_dim,
         #     out_channels=hidden_layer_size,
@@ -58,12 +63,10 @@ class RGCN(nn.Module):
         #     aggr="add",
         #     bias=False
         # )
-
-        self.dropout_ratio = dropout
         
         # Decoder (modular component)
         if decoder is None:
-            self.decoder = DistMult(num_nodes, num_relations, embedding_dim)
+            self.decoder = DistMult(num_nodes, num_relations, self.embedding_dim)
         else:
             self.decoder = decoder
     

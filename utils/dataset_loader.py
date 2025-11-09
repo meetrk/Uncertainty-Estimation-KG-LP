@@ -145,8 +145,6 @@ def generate_data(entity2id: Dict[str, int], relation2id: Dict[str, int],
     test_edge_index = torch.tensor(test_triplets[:, [0, 2]].T, dtype=torch.long)
     test_edge_type = torch.tensor(test_triplets[:, 1], dtype=torch.long)
 
-    x = torch.eye(num_entities, dtype=torch.float)
-
     data = Data(
         num_nodes=num_entities, 
         edge_index=edge_index, 
@@ -159,7 +157,6 @@ def generate_data(entity2id: Dict[str, int], relation2id: Dict[str, int],
             np.concatenate([train_triplets, valid_triplets, test_triplets], axis=0), 
             dtype=torch.long
         ),
-        x=x,
         val_graph=Data(
             edge_index=val_edge_index,
             edge_type=val_edge_type,
