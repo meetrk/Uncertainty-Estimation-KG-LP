@@ -137,7 +137,7 @@ class Pipeline:
 
         # Backward pass
         loss.backward()
-
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         return loss, roc_auc_score

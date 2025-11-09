@@ -1,8 +1,8 @@
 # Core dependencies for Knowledge Graph Link Prediction with RGCN
 torch>=2.0.0
-torch-geometric>=2.7.0
+torch-geometric<=2.6.1
 numpy>=1.26.0
-scikit-learn>=1.7.0
+scikit-learn<=1.7.0
 pyyaml>=6.0.0
 tqdm>=4.66.0
 

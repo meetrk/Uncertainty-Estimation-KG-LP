@@ -67,19 +67,18 @@ class KGEModel(torch.nn.Module):
 
         pos_score = self(X, head_index, rel_type, tail_index)
         neg_score = self(X, *self.random_sample(head_index, rel_type, tail_index))
-
+        print("pos_score stats:", torch.min(pos_score).item(), torch.max(pos_score).item(), torch.isnan(pos_score).sum().item())
+        print("neg_score stats:", torch.min(neg_score).item(), torch.max(neg_score).item(), torch.isnan(neg_score).sum().item())
         scores = torch.cat([pos_score,neg_score])
         labels = torch.cat([
                 torch.ones(pos_score.size()),
                 torch.zeros(neg_score.size())
             ])
-
+        scores = torch.clamp(scores, min=-30.0, max=30.0)
         loss = F.binary_cross_entropy_with_logits(
             input= scores,
             target= labels)
-
         auc_score = roc_auc_score(y_score=scores.detach().numpy(),y_true=labels.detach().numpy())
-
         return loss, auc_score
 
     # def loader(
