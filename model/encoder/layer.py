@@ -4,6 +4,12 @@ from torch.nn import Parameter as Param
 from torch_geometric.nn.conv import MessagePassing
 import math
 from utils.initialiser import schlichtkrull_normal_,schlichtkrull_uniform_
+from torch_geometric.nn.conv.rgcn_conv import masked_edge_index
+from torch_geometric.typing import Adj, OptTensor, Tensor,pyg_lib,SparseTensor
+from torch_geometric.utils import spmm
+import torch_geometric.typing
+from torch_geometric import is_compiling
+
 
 class RGCNLayer(MessagePassing):
     
@@ -74,30 +80,47 @@ class RGCNLayer(MessagePassing):
     def forward(self, x, edge_index, edge_type, size=None):
         out = torch.zeros(x.size(0), self.out_channels, device=x.device)
         
-        # Iterate over each relation type
+        weight = (self.att @ self.basis.view(self.num_bases, -1)).view(
+                self.num_relations, self.in_channels, self.out_channels)
+        
         for i in range(self.num_relations):
-            mask = edge_type == i
-            edge_index_i = edge_index[:, mask]
-            
-            # Propagate WITHOUT calling update
-            h = self.propagate(edge_index_i, x=x, relation=i, size=None)
-            out = out + h
-        
-        # Add root transformation ONCE after all relations
-        if self.root is not None:
-            out = out + torch.matmul(x, self.root)
-        
-        # Add bias ONCE
+            tmp = masked_edge_index(edge_index, edge_type == i)
+
+            if not torch.is_floating_point(x):
+                out = out + self.propagate(
+                    tmp,
+                    x=weight[i, x] ,
+                    edge_type_ptr=None,
+                    size=size,
+                )
+            else:
+                h = self.propagate(tmp, x=x, edge_type_ptr=None,
+                                   size=size)
+                out = out + (h @ weight[i])
+        root = self.root
+        if root is not None:
+            if not torch.is_floating_point(x):
+                out = out + root[x]
+            else:
+                out = out + x @ root
+
         if self.bias is not None:
             out = out + self.bias
 
         return out
 
-    def message(self, x_j, relation):
-        
-        w = torch.matmul(self.att, self.basis.view(self.num_bases, -1))
-        w = w.view(self.num_relations, self.in_channels, self.out_channels)
-        return torch.matmul(x_j, w[relation])
+    def message(self, x_j: torch.Tensor, edge_type_ptr: OptTensor) -> Tensor:
+        if (torch_geometric.typing.WITH_SEGMM and not is_compiling()
+                and edge_type_ptr is not None):
+            # TODO Re-weight according to edge type degree for `aggr=mean`.
+            return pyg_lib.ops.segment_matmul(x_j, edge_type_ptr, self.weight)
+
+        return x_j
+
+    def message_and_aggregate(self, adj_t: Adj, x: Tensor) -> Tensor:
+        if isinstance(adj_t, SparseTensor):
+            adj_t = adj_t.set_value(None)
+        return spmm(adj_t, x, reduce=self.aggr)
         
     
     def __repr__(self):

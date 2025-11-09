@@ -44,9 +44,9 @@ class RGCN(nn.Module):
         
         # RGCN layers
         self.conv1 = RGCNLayer(
-            self.embedding_dim, self.hidden_layer_size, self.num_relations * 2, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
+            self.embedding_dim, self.hidden_layer_size, self.num_relations * 2 + 1, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
         self.conv2 = RGCNLayer(
-            self.hidden_layer_size, self.embedding_dim, self.num_relations * 2, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
+            self.hidden_layer_size, self.embedding_dim, self.num_relations * 2 + 1, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
         # self.conv1 = RGCNConv(
         #     in_channels=embedding_dim,
         #     out_channels=hidden_layer_size,
