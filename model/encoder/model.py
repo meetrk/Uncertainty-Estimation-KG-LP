@@ -35,6 +35,8 @@ class RGCN(nn.Module):
         self.w_init = model_config['encoder'].get('w_init', None)
         self.w_gain = model_config['encoder'].get('w_gain', False)
         self.b_init = model_config['encoder'].get('b_init', False)
+        self.decoder_l2_type =model_config['decoder'].get('l2_type', 'schlichtkrull-l2')
+        self.decoder_l2_penalty = model_config['decoder'].get('l2_penalty', 0.0)
 
         
         # Entity embeddings (encoder)
@@ -70,7 +72,7 @@ class RGCN(nn.Module):
         else:
             self.decoder = decoder
     
-    def forward(self, edge_index, edge_type):
+    def forward(self, batch):
         """
         Encode entities using RGCN layers.
         
@@ -85,27 +87,41 @@ class RGCN(nn.Module):
 
         x = self.entity_embedding + self.entity_embedding_bias
         x = torch.nn.functional.relu(x)
-        x = self.conv1(x, edge_index, edge_type)
+        x = self.conv1(x, batch.edge_index, batch.edge_type)
         x = F.relu(x)
-        x = self.conv2(x, edge_index, edge_type)
+        x = self.conv2(x, batch.edge_index, batch.edge_type)
 
-        triples = get_triples(edge_index=edge_index,edge_type=edge_type)
+        triples = get_triples(edge_index=batch.edge_label_index, edge_type=batch.edge_label_type)
 
         pred_logits = self.decoder(x, triples[:,0], triples[:,1], triples[:,2])
 
         loss,roc_auc_score = self.decoder.loss(x, triples[:,0], triples[:,1], triples[:,2])
+
+        loss += self.compute_penalty(triples, x)  * self.decoder_l2_penalty
         
         return pred_logits, loss, roc_auc_score
     
+    def compute_penalty(self, batch, x):
+        """ Compute L2 penalty for decoder """
+        if self.decoder_l2_penalty == 0.0:
+            return 0
+
+        if self.decoder_l2_type == 'schlichtkrull-l2':
+            return self.decoder.s_penalty(batch, x)
+        else:
+            return self.decoder.rel_emb.pow(2).sum()
+
     @torch.no_grad()
     def test(
         self,
-        head_index: Tensor,
-        rel_type: Tensor,
-        tail_index: Tensor,
+        batch,
         batch_size: int,
         k: int = 10,
         log: bool = True):
+
+        head_index = batch.edge_label_index[:, 0]
+        rel_type = batch.edge_label_type
+        tail_index = batch.edge_label_index[:, 1]
 
         self.eval()
         print("Starting evaluation...")

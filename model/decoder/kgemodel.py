@@ -181,3 +181,19 @@ class KGEModel(torch.nn.Module):
         return (f'{self.__class__.__name__}({self.num_nodes}, '
                 f'num_relations={self.num_relations}, '
                 f'hidden_channels={self.hidden_channels})')
+
+    def s_penalty(self, triples, nodes):
+        """ Compute Schlichtkrull L2 penalty for the decoder """
+
+        s_index, p_index, o_index = split_spo(triples)
+
+        s, p, o = nodes[s_index, :], self.rel_emb[p_index, :], nodes[o_index, :]
+
+        return s.pow(2).mean() + p.pow(2).mean() + o.pow(2).mean()
+    
+def split_spo(triples: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    """ Splits triplets into subject, predicate and object indices. """
+    s_index = triples[:, 0]
+    p_index = triples[:, 1]
+    o_index = triples[:, 2]
+    return s_index, p_index, o_index

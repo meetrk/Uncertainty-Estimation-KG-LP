@@ -2,11 +2,12 @@ import torch
 from pathlib import Path
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from model.DataModel import LinkSplitter
 from utils.utils import generate_batch_triples
 from datetime import datetime
 import numpy as np
 from utils.utils import get_edges
-
+from torch_geometric.loader import LinkNeighborLoader
 class Pipeline:
 
     def __init__(self, model, data, config, logger):
@@ -19,8 +20,9 @@ class Pipeline:
         self.learning_rate = self.train_config['optimiser']['learning_rate']
         self.weight_decay = self.train_config['optimiser']['weight_decay']
         self.device = next(model.parameters()).device
-
-
+        self.splitter = LinkSplitter(data, disjoint_train_ratio=0.3)
+        self.train_data, self.val_data, self.test_data = self.splitter.split()
+        print(self.train_data)
         self.optimizer = torch.optim.Adam(
             model.parameters(), 
             lr=self.learning_rate, 
@@ -44,7 +46,7 @@ class Pipeline:
         eval_frequency = self.train_config.get('evaluation_frequency', 10)
         save_frequency = self.train_config.get('save_frequency', 20)
         
-    
+        
 
         self.logger.info(f"Starting training for {max_epochs} epochs")
         
@@ -54,37 +56,31 @@ class Pipeline:
         for epoch in tqdm_range:
             self.epoch = epoch
             
-            # Training
-            epoch_loss = 0.0
 
-            triple_batch = generate_batch_triples(self.data.train_triplets, self.data.num_nodes, self.train_config, mode="train", sampling=self.train_config['sampling']['method'])
-        
-            loss, auc_score = self.train(
-                triples=triple_batch
+            loss,score = self.train(
+                batch=self.train_data
             )
-            epoch_loss += loss.item()
+            
 
-            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": epoch_loss, "auc_score": auc_score})
+            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": loss, "auc_score": score})
 
             
             # Log training loss to TensorBoard
-            self.writer.add_scalar('Loss/Train', epoch_loss, epoch)
-            self.writer.add_scalar('AUC SCORE/Train', auc_score, epoch)
+            self.writer.add_scalar('Loss/Train', loss, epoch)
+            self.writer.add_scalar('AUC SCORE/Train', score, epoch)
             
             # Log gradients periodically
             if epoch % 10 == 0:  # Log gradients every 10 epochs
                 self.log_model_gradients(epoch)
 
-            self.logger.info(f"Epoch {epoch} completed. Loss: {epoch_loss:.4f}")
-            self.logger.info(f"Epoch {epoch} completed. AUC Score: {auc_score:.4f}")
+            self.logger.info(f"Epoch {epoch} completed. Loss: {loss:.4f}")
+            self.logger.info(f"Epoch {epoch} completed. AUC Score: {score:.4f}")
 
             # Evaluation
             if epoch % eval_frequency == 0:
 
                 mean_rank, mrr, hits_at_k = self.model.test(
-                    head_index=self.data.train_triplets[:,0],
-                    rel_type=self.data.train_triplets[:,1],
-                    tail_index=self.data.train_triplets[:,2],
+                    batch=self.train_data,
                     batch_size=256,
                     k=10
                 )
@@ -118,26 +114,16 @@ class Pipeline:
 
 
 
-    def train(self, triples):
+    def train(self, batch):
         """
         Train the model on a single batch.
         """
 
         self.model.train()
         self.optimizer.zero_grad()
-
-        edge_label_index, edge_label_type = get_edges(triples)
-       
-        # Move data to device
-        edge_label_index = edge_label_index.to(self.device)
-        edge_label_type = edge_label_type.to(self.device)
-
-
-        pred_logits, loss, roc_auc_score = self.model(edge_label_index, edge_label_type) 
-
+        pred_logits, loss, roc_auc_score = self.model(batch) # Forward pass
         # Backward pass
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         return loss, roc_auc_score
@@ -189,12 +175,7 @@ class Pipeline:
         self.model.eval()
         with torch.no_grad():
 
-            val_triplets = generate_batch_triples(self.data.valid_triplets, self.data.num_nodes, self.train_config,mode="eval", sampling=self.train_config['sampling']['method'])
-
-            val_edge_index,val_edge_labels = get_edges(triplets=val_triplets)
-
-            score,val_loss,val_roc_auc_score = self.model(val_edge_index, val_edge_labels)
-
+            score,val_loss,val_roc_auc_score = self.model(self.val_data)
             return val_loss,val_roc_auc_score
         
     
