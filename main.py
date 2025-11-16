@@ -3,7 +3,7 @@ import logging
 import sys
 from pathlib import Path
 from utils.config_loader import ConfigLoader
-from utils.utils import setup_and_load_dataset
+from torch_geometric.datasets import WordNet18RR,FB15k_237
 from model.encoder.model import RGCN
 from model.decoder.distmult import DistMult
 from model.decoder.transe import TransE
@@ -66,19 +66,20 @@ def main():
     dataset_config = config_loader.get_section('dataset') 
     training_config = config_loader.get_section('training')
     model_config = config_loader.get_section('model')
-    # Load dataset and generate a PyG data object
-    data = setup_and_load_dataset(dataset_config, logger)
-    print(data)
-    
-    # Determine number of nodes
-    if hasattr(data, 'num_nodes') and data.num_nodes is not None:
-        num_nodes = int(data.num_nodes)
-    elif hasattr(data, 'edge_index') and data.edge_index is not None:
-        num_nodes = int(data.edge_index.max().item()) + 1
+
+
+    if dataset_config['name'] == "WN18RR":
+        dataset = WordNet18RR
+    elif dataset_config['name'] == "FB15k-237":
+        dataset = FB15k_237
     else:
-        raise ValueError("Cannot determine number of nodes from data")
+        raise ValueError("Unsupported dataset specified")
+
+    data = dataset(root=f"./dataset/{dataset_config['name']}").data
+    data.num_relations = len(data.edge_type.unique())
+    logger.info(f"Dataset '{dataset_config['name']}' loaded with {data.num_nodes} nodes and {data.num_relations} relations.")
     
-    logger.info(f"Dataset loaded: {num_nodes} nodes, {data.num_relations} relations")
+    
 
     # Initialize decoder
     if config_loader.get_section('model')['decoder']['type'] == 'DistMult':
@@ -89,15 +90,15 @@ def main():
         raise ValueError("Unsupported decoder type specified")
 
     decoder = decoder(
-        num_nodes=num_nodes,
-        num_relations=data.num_relations,
+        num_nodes=data.num_nodes,
+        num_relations=(data.num_relations * 2) + 1 ,
         hidden_channels=config_loader.get_section('model')['encoder']['embedding_dim'],
     )
     logger.info(f"Decoder initialized: {decoder}")
     logger.info(f"Decoder parameters count: {sum(p.numel() for p in decoder.parameters())}")
 
     model = RGCN(
-        num_nodes=num_nodes,
+        num_nodes=data.num_nodes,
         num_relations=data.num_relations,
         model_config=model_config,
         decoder=decoder
