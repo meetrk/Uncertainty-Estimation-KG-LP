@@ -78,6 +78,7 @@ def main():
     data = dataset(root=f"./dataset/{dataset_config['name']}").data
     data.num_relations = len(data.edge_type.unique())
     logger.info(f"Dataset '{dataset_config['name']}' loaded with {data.num_nodes} nodes and {data.num_relations} relations.")
+    logger.info(f"Data object: {data}")
     
     
 

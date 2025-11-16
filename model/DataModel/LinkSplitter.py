@@ -11,8 +11,17 @@ class LinkSplitter:
         self.val_data = Data()
         self.test_data = Data()
 
-        self.split()
-
+        if self.data.get('train_mask') is None or self.data.get('val_mask') is None or self.data.get('test_mask') is None:
+            size = self.data.edge_index.size(1)
+            indices = torch.randperm(size)
+            train_cutoff = int(0.8 * size)
+            val_cutoff = int(0.9 * size)
+            train_mask = indices < train_cutoff
+            val_mask = (indices >= train_cutoff) & (indices < val_cutoff)
+            test_mask = indices >= val_cutoff
+            self.data.train_mask = train_mask
+            self.data.val_mask = val_mask
+            self.data.test_mask = test_mask
         
     def split(
         self,
