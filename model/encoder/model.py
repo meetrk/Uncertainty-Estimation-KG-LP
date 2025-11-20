@@ -50,18 +50,18 @@ class RGCN(nn.Module):
         self.conv2 = RGCNLayer(
             self.hidden_layer_size, self.embedding_dim, self.num_relations * 2 + 1, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
         # self.conv1 = RGCNConv(
-        #     in_channels=embedding_dim,
-        #     out_channels=hidden_layer_size,
-        #     num_relations=num_relations,
-        #     num_bases=num_bases,
+        #     in_channels=self.embedding_dim,
+        #     out_channels=self.hidden_layer_size,
+        #     num_relations=self.num_relations * 2 + 1,
+        #     num_bases=self.num_bases,
         #     aggr="add",
         #     bias=False
         # )
         # self.conv2 = RGCNConv(
-        #     in_channels=embedding_dim,
-        #     out_channels=hidden_layer_size,
-        #     num_relations=num_relations,
-        #     num_bases=num_bases,
+        #     in_channels=self.embedding_dim,
+        #     out_channels=self.hidden_layer_size,
+        #     num_relations=self.num_relations * 2 + 1,
+        #     num_bases=self.num_bases,
         #     aggr="add",
         #     bias=False
         # )
@@ -91,23 +91,25 @@ class RGCN(nn.Module):
         x = F.relu(x)
         x = self.conv2(x, batch.edge_index, batch.edge_type)
 
-        triples = get_triples(edge_index=batch.edge_label_index, edge_type=batch.edge_label_type)
+        head_index = batch.edge_label_index[0, :]
+        rel_type = batch.edge_label_type
+        tail_index = batch.edge_label_index[1, :]
 
-        pred_logits = self.decoder(x, triples[:,0], triples[:,1], triples[:,2])
+        assert head_index.size() == rel_type.size() == tail_index.size()
 
-        loss,roc_auc_score = self.decoder.loss(x, triples[:,0], triples[:,1], triples[:,2])
+        loss,roc_auc_score = self.decoder.loss(x, head_index, rel_type, tail_index)
 
-        loss += self.compute_penalty(triples, x)  * self.decoder_l2_penalty
-        
-        return pred_logits, loss, roc_auc_score
-    
-    def compute_penalty(self, batch, x):
+        loss += self.compute_penalty(head_index, rel_type, tail_index, x)  * self.decoder_l2_penalty
+
+        return loss, roc_auc_score
+
+    def compute_penalty(self, head_index, rel_type, tail_index, x):
         """ Compute L2 penalty for decoder """
         if self.decoder_l2_penalty == 0.0:
             return 0
 
         if self.decoder_l2_type == 'schlichtkrull-l2':
-            return self.decoder.s_penalty(batch, x)
+            return self.decoder.s_penalty(head_index, rel_type, tail_index, x)
         else:
             return self.decoder.rel_emb.pow(2).sum()
 
@@ -116,8 +118,10 @@ class RGCN(nn.Module):
         self,
         batch,
         batch_size: int,
+        all_triples,
         k: int = 10,
-        log: bool = True):
+        log: bool = True,
+        ):
 
         head_index = batch.edge_label_index[:, 0]
         rel_type = batch.edge_label_type
@@ -131,6 +135,7 @@ class RGCN(nn.Module):
             rel_type,
             tail_index,
             batch_size,
+            all_triples,
             k,
             log
         )

@@ -78,11 +78,17 @@ class Pipeline:
 
             # Evaluation
             if epoch % eval_frequency == 0:
-
+                
+                all_triples = torch.stack([
+                    self.data.edge_index[0],
+                    self.data.edge_type,
+                    self.data.edge_index[1]
+                ], dim=1)
                 mean_rank, mrr, hits_at_k = self.model.test(
-                    batch=self.train_data,
-                    batch_size=256,
-                    k=10
+                    batch=self.val_data,
+                    all_triples=all_triples,
+                    batch_size=self.train_config['evaluation']['batch_size'],
+                    k=self.train_config['evaluation']['hits_at_k'],
                 )
                 self.logger.info(f"Evaluation metrics at epoch {epoch}: 'Mean Rank': {mean_rank}, 'MRR': {mrr}, 'Hits@10': {hits_at_k}")
 
@@ -121,7 +127,7 @@ class Pipeline:
 
         self.model.train()
         self.optimizer.zero_grad()
-        pred_logits, loss, roc_auc_score = self.model(batch) # Forward pass
+        loss, roc_auc_score = self.model(batch) # Forward pass
         # Backward pass
         loss.backward()
         self.optimizer.step()
@@ -148,14 +154,14 @@ class Pipeline:
             'learning_rate': self.learning_rate,
             'weight_decay': self.weight_decay,
             'epochs': self.train_config['epochs'],
-            'batch_size': self.train_config['sampling']['batch_size'],
+            # 'batch_size': self.train_config['sampling']['batch_size'],
             'negative_sampling_ratio': self.train_config['sampling']['negative_sampling_ratio'],
             'embedding_dim': self.model_config['encoder']['embedding_dim'],
             'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
             'num_bases': self.model_config['encoder']['num_bases'],
             'b_init': self.model_config['decoder']['b_init'],
             'w_gain': self.model_config['decoder']['w_gain'],
-            'sampling_method': self.train_config['sampling']['method']
+            # 'sampling_method': self.train_config['sampling']['method']
         }
         
         # Add text summary of hyperparameters
@@ -175,7 +181,7 @@ class Pipeline:
         self.model.eval()
         with torch.no_grad():
 
-            score,val_loss,val_roc_auc_score = self.model(self.val_data)
+            val_loss,val_roc_auc_score = self.model(self.val_data)
             return val_loss,val_roc_auc_score
         
     
