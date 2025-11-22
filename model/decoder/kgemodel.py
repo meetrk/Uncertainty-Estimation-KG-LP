@@ -6,7 +6,7 @@ from torch.nn import Embedding
 from tqdm import tqdm
 from torch.nn import Parameter
 import torch.nn.functional as F
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
 
 from torch_geometric.nn.kge.loader import KGTripletLoader
 
@@ -63,10 +63,11 @@ class KGEModel(torch.nn.Module):
         head_index: Tensor,
         rel_type: Tensor,
         tail_index: Tensor,
+        all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio
     ):
 
         pos_score = self(X, head_index, rel_type, tail_index)
-        neg_score = self(X, *self.random_sample(head_index, rel_type, tail_index))
+        neg_score = self(X, *self.negative_sampling(head_index, rel_type, tail_index, all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio))
 
         scores = torch.cat([pos_score,neg_score])
         labels = torch.cat([
@@ -76,9 +77,17 @@ class KGEModel(torch.nn.Module):
         loss = F.binary_cross_entropy_with_logits(
             input= scores,
             target= labels)
-        scores = torch.sigmoid(scores)
         auc_score = roc_auc_score(y_score=scores.detach().numpy(),y_true=labels.detach().numpy())
-        return loss, auc_score
+        precision, recall, f1_score, _ = precision_recall_fscore_support(labels.detach().numpy(), (scores.detach().numpy() > 0).astype(int), average='binary')
+        scores = {
+            "auc": auc_score,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1_score
+        }
+
+
+        return loss, scores
 
     # def loader(
     #     self,
@@ -166,51 +175,80 @@ class KGEModel(torch.nn.Module):
         head_index: Tensor,
         rel_type: Tensor,
         tail_index: Tensor,
-        num_neg_per_pos: int = 10,
-        head_corruption_prob: float = 0.5,
     ) -> Tuple[Tensor, Tensor, Tensor]:
-        r"""Randomly samples negative triplets by corrupting either the head or
-        the tail (but not both) using uniform random sampling.
+        r"""Randomly samples negative triplets by either replacing the head or
+        the tail (but not both).
 
         Args:
-            head_index (torch.Tensor): The head indices of shape [batch_size].
-            rel_type (torch.Tensor): The relation type of shape [batch_size].
-            tail_index (torch.Tensor): The tail indices of shape [batch_size].
-            num_neg_per_pos (int, optional): Number of negative samples to generate
-                per positive sample. (default: :obj:`1`)
-            head_corruption_prob (float, optional): Probability of corrupting the head
-                entity vs tail entity. Value should be in [0, 1]. If 0.5, equal chance
-                of head or tail corruption. If 0.0, only tail corruption. If 1.0, only
-                head corruption. (default: :obj:`0.5`)
-        
-        Returns:
-            Tuple of (neg_head_index, neg_rel_type, neg_tail_index) where each tensor
-            has shape [batch_size * num_neg_per_pos].
+            head_index (torch.Tensor): The head indices.
+            rel_type (torch.Tensor): The relation type.
+            tail_index (torch.Tensor): The tail indices.
         """
+        # Random sample either `head_index` or `tail_index` (but not both):
+        num_negatives = head_index.numel() // 2
+        rnd_index = torch.randint(self.num_nodes, head_index.size(),
+                                  device=head_index.device)
+
+        head_index = head_index.clone()
+        head_index[:num_negatives] = rnd_index[:num_negatives]
+        tail_index = tail_index.clone()
+        tail_index[num_negatives:] = rnd_index[num_negatives:]
+
+        return head_index, rel_type, tail_index
+    
+    @torch.no_grad()
+    def negative_sampling(
+        self, 
+        head_index, 
+        rel_type, 
+        tail_index, 
+        all_triples, 
+        entity_count,
+        head_corrupt_prob=0.5, 
+        negative_sampling_ratio=1
+    ):
+        # Step 1: Decide number of negatives per positive
         batch_size = head_index.numel()
-        device = head_index.device
-        
-        # Repeat each positive sample num_neg_per_pos times
-        # Shape: [batch_size * num_neg_per_pos]
-        neg_head = head_index.repeat_interleave(num_neg_per_pos)
-        neg_rel = rel_type.repeat_interleave(num_neg_per_pos)
-        neg_tail = tail_index.repeat_interleave(num_neg_per_pos)
-        
-        total_samples = batch_size * num_neg_per_pos
-        
-        # Decide which samples to corrupt head vs tail
-        # Shape: [batch_size * num_neg_per_pos]
-        corrupt_head_mask = torch.rand(total_samples, device=device) < head_corruption_prob
-        
-        # Generate random node indices for corruption
-        # Shape: [batch_size * num_neg_per_pos]
-        rnd_nodes = torch.randint(0, self.num_nodes, (total_samples,), device=device)
-        
+        num_negatives = batch_size * negative_sampling_ratio
+
+        # Step 2: Repeat triples for negatives
+        head_pos = head_index.repeat(negative_sampling_ratio)
+        rel_pos = rel_type.repeat(negative_sampling_ratio)
+        tail_pos = tail_index.repeat(negative_sampling_ratio)
+
+        # Step 3: Randomly decide which to corrupt (head or tail)
+        # True = corrupt head, False = corrupt tail
+        corruption_mask = torch.rand(num_negatives, device=head_index.device) < head_corrupt_prob
+
+        # Step 4: Draw random entity replacements
+        random_entities = torch.randint(0, entity_count, (num_negatives,), device=head_index.device)
+
+        neg_heads = head_pos.clone()
+        neg_tails = tail_pos.clone()
+
         # Apply corruption
-        neg_head[corrupt_head_mask] = rnd_nodes[corrupt_head_mask]
-        neg_tail[~corrupt_head_mask] = rnd_nodes[~corrupt_head_mask]
-        
-        return neg_head, neg_rel, neg_tail
+        neg_heads[corruption_mask] = random_entities[corruption_mask]
+        neg_tails[~corruption_mask] = random_entities[~corruption_mask]
+
+        # **Optional Step 5: Filter out any negatives that are actually positives**
+        # Build set of all true triples for fast lookup
+        # (for large graphs, skip or make approximate)
+        triple_set = set(tuple(triple.tolist()) for triple in all_triples)
+        negatives = []
+        for h, r, t in zip(neg_heads.tolist(), rel_pos.tolist(), neg_tails.tolist()):
+            if (h, r, t) not in triple_set:
+                negatives.append((h, r, t))
+
+        # Convert to tensor
+        if negatives:
+            negatives = torch.tensor(negatives, dtype=head_index.dtype, device=head_index.device).T
+            neg_heads, rel_neg, neg_tails = negatives[0], negatives[1], negatives[2]
+        else:
+            neg_heads, rel_neg, neg_tails = neg_heads, rel_pos, neg_tails
+
+        # Output as you need (stacked)
+        return neg_heads, rel_neg, neg_tails
+
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.num_nodes}, '

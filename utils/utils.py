@@ -87,11 +87,23 @@ def negative_sampling(batch, num_nodes, head_corrupt_prob, device='mps'):
     return batch.view(bs * ns, -1)
 
 
-def edge_neighborhood(train_triples, sample_size=30000, num_nodes=None):
-    """ Edge neighborhood sampling """
+def edge_neighborhood(edge_index,edge_type, sample_size=30000, num_nodes=None, return_indices=False):
+    """ Edge neighborhood sampling 
+    
+    Args:
+        train_triples: Training triples tensor of shape [num_triples, 3]
+        sample_size: Number of edges to sample
+        num_nodes: Total number of nodes (optional, inferred if None)
+        return_indices: If True, return indices instead of actual triples
+        
+    Returns:
+        If return_indices=True: List/array of indices into train_triples
+        If return_indices=False: List of actual triple tensors (original behavior)
+    """
 
+    train_triples = get_triples(edge_index, edge_type)
     if num_nodes is None:
-        num_nodes = train_triples.max().item() + 1
+        num_nodes = edge_index.max().item() + 1
     
     adj_list = [[] for _ in range(num_nodes)]
     for i, triplet in enumerate(train_triples):
@@ -135,12 +147,16 @@ def edge_neighborhood(train_triples, sample_size=30000, num_nodes=None):
         sample_counts[other_vertex] -= 1
         seen[other_vertex] = True
 
-    edges = [train_triples[e] for e in edges]
-    return edges
+    # Return indices or actual triples based on flag
+    if return_indices:
+        return edges  # Return numpy array of indices
+    else:
+        edges = [train_triples[e] for e in edges]  # Original behavior
+        return edges
 
 
 
-def generate_batch_triples(triples, num_nodes, config, mode, sampling="sample",):
+def generate_batch_triples(triples, num_nodes, config, mode, sampling="sample"):
 
     """ Generate batch for training """
     if mode == "train":
@@ -151,9 +167,9 @@ def generate_batch_triples(triples, num_nodes, config, mode, sampling="sample",)
         raise ValueError(f"Unknown mode: {mode}")
     
     if sampling == "edge-neighborhood":
-        batch = edge_neighborhood(triples, sample_size=sample_size, num_nodes=num_nodes)
+        indices = edge_neighborhood(triples, sample_size=sample_size, num_nodes=num_nodes)
         # Stack list of tensors into a single tensor
-        batch = torch.stack(batch)
+        batch = triples[indices]
     elif sampling == "sample":
         indices = sample(range(triples.size(0)), k=sample_size)
         batch = triples[indices]

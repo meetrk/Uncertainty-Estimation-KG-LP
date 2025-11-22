@@ -72,7 +72,7 @@ class RGCN(nn.Module):
         else:
             self.decoder = decoder
     
-    def forward(self, batch):
+    def forward(self, batch, all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio,X=None):
         """
         Encode entities using RGCN layers.
         
@@ -84,8 +84,10 @@ class RGCN(nn.Module):
         Returns:
             Entity embeddings [num_nodes, embedding_dim]
         """
-
-        x = self.entity_embedding + self.entity_embedding_bias
+        if X is None:
+            x = self.entity_embedding + self.entity_embedding_bias
+        else:
+            x = X
         x = torch.nn.functional.relu(x)
         x = self.conv1(x, batch.edge_index, batch.edge_type)
         x = F.relu(x)
@@ -97,11 +99,11 @@ class RGCN(nn.Module):
 
         assert head_index.size() == rel_type.size() == tail_index.size()
 
-        loss,roc_auc_score = self.decoder.loss(x, head_index, rel_type, tail_index)
+        loss,scores = self.decoder.loss(x, head_index, rel_type, tail_index,all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio)
 
         loss += self.compute_penalty(head_index, rel_type, tail_index, x)  * self.decoder_l2_penalty
 
-        return loss, roc_auc_score
+        return loss, scores
 
     def compute_penalty(self, head_index, rel_type, tail_index, x):
         """ Compute L2 penalty for decoder """

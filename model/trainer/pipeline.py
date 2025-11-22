@@ -8,6 +8,7 @@ from datetime import datetime
 import numpy as np
 from utils.utils import get_edges
 from torch_geometric.loader import LinkNeighborLoader
+from types import SimpleNamespace
 class Pipeline:
 
     def __init__(self, model, data, config, logger):
@@ -20,14 +21,20 @@ class Pipeline:
         self.learning_rate = self.train_config['optimiser']['learning_rate']
         self.weight_decay = self.train_config['optimiser']['weight_decay']
         self.device = next(model.parameters()).device
-        self.splitter = LinkSplitter(data, disjoint_train_ratio=0.3)
-        self.train_data, self.val_data, self.test_data = self.splitter.split()
-        print(self.train_data)
+        self.splitter = LinkSplitter(data, disjoint_train_ratio=0.4)
+        
+
+
         self.optimizer = torch.optim.Adam(
             model.parameters(), 
             lr=self.learning_rate, 
             weight_decay=self.weight_decay
         )
+        self.all_triples = torch.stack([
+                    self.data.edge_index[0],
+                    self.data.edge_type,
+                    self.data.edge_index[1]
+                ], dim=1)
         
         # Initialize TensorBoard writer
         log_dir = Path('runs') / f"experiment_{self.config.get_section('dataset')}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -57,36 +64,55 @@ class Pipeline:
             self.epoch = epoch
             
 
-            loss,score = self.train(
-                batch=self.train_data
+            batch = self.splitter.generate_batch_triples(
+                num_nodes=self.data.num_nodes,
+                config=self.train_config,
+                mode="train",
+                sampling=self.train_config['sampling']['type'],
+            )
+            print(batch)
+            loss,scores = self.train(
+                batch=batch,
+                all_triples=self.all_triples,
+                entity_count=self.data.num_nodes,
+                head_corrupt_prob=self.train_config['sampling']['head_corrupt_prob'],
+                negative_sampling_ratio=self.train_config['sampling']['negative_sampling_ratio'],
             )
             
 
-            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": loss, "auc_score": score})
+            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": loss, "auc_score": scores['auc'], "precision": scores['precision'], "recall": scores['recall'], "f1": scores['f1']})
 
             
             # Log training loss to TensorBoard
             self.writer.add_scalar('Loss/Train', loss, epoch)
-            self.writer.add_scalar('AUC SCORE/Train', score, epoch)
-            
+            self.writer.add_scalar('AUC SCORE/Train', scores['auc'], epoch)
+            self.writer.add_scalar('Precision/Train', scores['precision'], epoch)
+            self.writer.add_scalar('Recall/Train', scores['recall'], epoch)
+            self.writer.add_scalar('F1 Score/Train', scores['f1'], epoch)
+
             # Log gradients periodically
             if epoch % 10 == 0:  # Log gradients every 10 epochs
                 self.log_model_gradients(epoch)
 
             self.logger.info(f"Epoch {epoch} completed. Loss: {loss:.4f}")
-            self.logger.info(f"Epoch {epoch} completed. AUC Score: {score:.4f}")
+            self.logger.info(f"Epoch {epoch} completed. AUC Score: {scores['auc']:.4f}")
+            self.logger.info(f"Epoch {epoch} completed. Precision: {scores['precision']:.4f}")
+            self.logger.info(f"Epoch {epoch} completed. Recall: {scores['recall']:.4f}")
+            self.logger.info(f"Epoch {epoch} completed. F1 Score: {scores['f1']:.4f}")
 
             # Evaluation
             if epoch % eval_frequency == 0:
-                
-                all_triples = torch.stack([
-                    self.data.edge_index[0],
-                    self.data.edge_type,
-                    self.data.edge_index[1]
-                ], dim=1)
+
+                batch = self.splitter.generate_batch_triples(
+                    num_nodes=self.data.num_nodes,
+                    config=self.train_config,
+                    mode="train",
+                    sampling=self.train_config['sampling']['type'],
+                )
+
                 mean_rank, mrr, hits_at_k = self.model.test(
-                    batch=self.val_data,
-                    all_triples=all_triples,
+                    batch=batch,
+                    all_triples=self.all_triples,
                     batch_size=self.train_config['evaluation']['batch_size'],
                     k=self.train_config['evaluation']['hits_at_k'],
                 )
@@ -98,17 +124,23 @@ class Pipeline:
                 # self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_auc_score})
 
 
-                eval_loss_value, eval_auc_score = self.validation_loss()
+                eval_loss_value, eval_scores = self.validation_loss()
 
-                self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_auc_score})
-                
+                self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_scores['auc'], "eval_precision": eval_scores['precision'], "eval_recall": eval_scores['recall'], "eval_f1": eval_scores['f1']})
+
                 # Log evaluation loss to TensorBoard
                 self.writer.add_scalar('Loss/Validation', eval_loss_value, epoch)
-                self.writer.add_scalar('AUC SCORE/Validation', eval_auc_score, epoch)
-                self.logger.info(f"Evaluation Loss at epoch {epoch}: {eval_loss_value}")
-                self.logger.info(f"Evaluation AUC Score at epoch {epoch}: {eval_auc_score}")
+                self.writer.add_scalar('AUC SCORE/Validation', eval_scores['auc'], epoch)
+                self.writer.add_scalar('Precision/Validation', eval_scores['precision'], epoch)
+                self.writer.add_scalar('Recall/Validation', eval_scores['recall'], epoch)
+                self.writer.add_scalar('F1 Score/Validation', eval_scores['f1'], epoch)
                 
-            
+                self.logger.info(f"Evaluation Loss at epoch {epoch}: {eval_loss_value}")
+                self.logger.info(f"Evaluation AUC Score at epoch {epoch}: {eval_scores['auc']}")
+                self.logger.info(f"Evaluation Precision at epoch {epoch}: {eval_scores['precision']}")
+                self.logger.info(f"Evaluation Recall at epoch {epoch}: {eval_scores['recall']}")
+                self.logger.info(f"Evaluation F1 Score at epoch {epoch}: {eval_scores['f1']}")
+
             # Save checkpoint
             if epoch % save_frequency == 0:
                 self.save_checkpoint(epoch)
@@ -120,19 +152,19 @@ class Pipeline:
 
 
 
-    def train(self, batch):
+    def train(self, batch,all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio):
         """
         Train the model on a single batch.
         """
 
         self.model.train()
         self.optimizer.zero_grad()
-        loss, roc_auc_score = self.model(batch) # Forward pass
+        loss, scores = self.model(batch, all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio) # Forward pass
         # Backward pass
         loss.backward()
         self.optimizer.step()
 
-        return loss, roc_auc_score
+        return loss, scores
 
     
     def log_model_gradients(self, epoch):
@@ -181,10 +213,17 @@ class Pipeline:
         self.model.eval()
         with torch.no_grad():
 
-            val_loss,val_roc_auc_score = self.model(self.val_data)
-            return val_loss,val_roc_auc_score
-        
-    
+            batch = self.splitter.generate_batch_triples(
+                num_nodes=self.data.num_nodes,
+                config=self.train_config,
+                mode="val",
+                sampling=self.train_config['sampling']['type'],
+            )
+
+            val_loss,val_scores = self.model(batch,self.all_triples,self.data.num_nodes, head_corrupt_prob=self.train_config['sampling']['head_corrupt_prob'],negative_sampling_ratio=self.train_config['sampling']['negative_sampling_ratio'],)
+            return val_loss,val_scores
+
+
     def save_checkpoint(self, epoch):
         """Save model checkpoint."""
         checkpoint = {
