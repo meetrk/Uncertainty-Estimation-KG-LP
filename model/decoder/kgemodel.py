@@ -2,7 +2,7 @@ from typing import Tuple
 
 import torch
 from torch import Tensor
-from collections import defaultdict
+from torch.nn import Embedding
 from tqdm import tqdm
 from torch.nn import Parameter
 import torch.nn.functional as F
@@ -114,75 +114,55 @@ class KGEModel(torch.nn.Module):
     def test(
         self,
         X,
-        head_index: torch.Tensor,
-        rel_type: torch.Tensor,
-        tail_index: torch.Tensor,
+        head_index: Tensor,
+        rel_type: Tensor,
+        tail_index: Tensor,
         batch_size: int,
-        all_triples: torch.Tensor, 
+        all_triples: Tensor,  # Add this parameter
         k: int = 10,
         log: bool = True,
-    ) -> tuple[float, float, float]:
-        
+    ) -> Tuple[float, float, float]:
+        """
+        Args:
+            all_triples: Tensor of shape [num_triples, 3] containing 
+                        [head, rel, tail] for all known triples 
+                        (train + val + test) to filter
+        """
         arange = range(head_index.numel())
         arange = tqdm(arange) if log else arange
         
-        # 1. Pre-compute filter map: (h, r) -> list of known tails
-        # This moves the heavy lifting outside the testing loop
-        to_filter = defaultdict(list)
+        # Create a set of known triples for efficient filtering
         if all_triples is not None:
-            # Move to CPU for dictionary creation to save GPU memory/time
-            all_triples_cpu = all_triples.cpu()
-            for i in range(all_triples_cpu.size(0)):
-                h_idx, r_idx, t_idx = all_triples_cpu[i].tolist()
-                to_filter[(h_idx, r_idx)].append(t_idx)
-
+            known_triples = set(
+                map(tuple, all_triples.cpu().numpy())
+            )
+        
         mean_ranks, reciprocal_ranks, hits_at_k = [], [], []
-
         for i in arange:
             h, r, t = head_index[i], rel_type[i], tail_index[i]
             
-            # Calculate scores for all possible tails
             scores = []
             tail_indices = torch.arange(self.num_nodes, device=t.device)
             for ts in tail_indices.split(batch_size):
                 scores.append(self(X, h.expand_as(ts), r.expand_as(ts), ts))
+            
             all_scores = torch.cat(scores)
             
-            # 2. Vectorized Filtering
-            # Instead of looping num_nodes, we look up the specific indices to mask
+            # Filtered setting: Remove scores for known triples (except target)
             if all_triples is not None:
-                filter_indices = to_filter[(h.item(), r.item())]
-                
-                # Convert to tensor for indexing
-                # Note: Ensure the target 't' is NOT in this list, or explicitely unmask it
-                filter_indices = torch.tensor(filter_indices, device=all_scores.device)
-                
-                # Apply mask
-                all_scores.index_fill_(0, filter_indices, float('-inf'))
-                
-                # CRITICAL: Ensure the target triple itself is not filtered out
-                # (In case the target triple was in 'all_triples', which it usually is)
-                target_score = self(X, h.view(1), r.view(1), t.view(1)).squeeze()
-                all_scores[t] = target_score
-
-            # 3. Optimized Ranking (Avoiding full sort)
-            # We don't need to sort the whole array to find the rank. 
-            # Rank is simply: count(scores > target_score) + 1
+                for tail_idx in range(self.num_nodes):
+                    if tail_idx == t.item():
+                        continue  # Keep the target triple
+                    if (h.item(), r.item(), tail_idx) in known_triples:
+                        all_scores[tail_idx] = float('-inf')  # Filter out
             
-            # Get the score of the true target
-            target_score = all_scores[t]
-            
-            # Count how many scores are strictly greater than the target
-            # (Using strictly greater handles ties optimistically, >= handles strictly)
-            # Standard convention is usually "rank is count of scores >= target"
-            # but masking makes them unique usually.
-            # Below is the 'strict' rank calculation (best rank = 1)
-            rank = (all_scores > target_score).sum().item() + 1
+            # Compute rank of the true tail
+            rank = int((all_scores.argsort(descending=True) == t).nonzero().view(-1)[0])
             
             mean_ranks.append(rank)
-            reciprocal_ranks.append(1.0 / rank)
-            hits_at_k.append(rank <= k)
-
+            reciprocal_ranks.append(1 / (rank + 1))
+            hits_at_k.append(rank < k)
+        
         mean_rank = float(torch.tensor(mean_ranks, dtype=torch.float).mean())
         mrr = float(torch.tensor(reciprocal_ranks, dtype=torch.float).mean())
         hits_at_k = int(torch.tensor(hits_at_k).sum()) / len(hits_at_k)
