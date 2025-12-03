@@ -48,7 +48,7 @@ class LinkSplitter:
 
         data = self._split_mp_and_supervision(data)
         data = self._add_reverse_edges(data)
-        data = self._self_loop_edges(data)
+        # data = self._self_loop_edges(data)
         return data
     
     def _add_reverse_edges(
@@ -104,17 +104,21 @@ class LinkSplitter:
     ):
         """Splits the edges into message passing and supervision sets"""
 
-        edge_index = data.edge_index
-        edge_type = data.edge_type
-        num_edges = edge_index.size(1)
-        indices = torch.randperm(num_edges)
-        mask = indices < self.disjoint_train_ratio * num_edges
+        # edge_index = data.edge_index
+        # edge_type = data.edge_type
+        # num_edges = edge_index.size(1)
+        # indices = torch.randperm(num_edges)
+        # mask = indices < self.disjoint_train_ratio * num_edges
 
-        data.edge_index = edge_index[:, mask]
-        data.edge_type = edge_type[mask]
+        # data.edge_index = edge_index[:, mask]
+        # data.edge_type = edge_type[mask]
 
-        data.edge_label_index = edge_index[:, ~mask]
-        data.edge_label_type = edge_type[~mask]
+        # data.edge_label_index = edge_index[:, ~mask]
+        # data.edge_label_type = edge_type[~mask]
+
+        data.edge_label_index = data.edge_index
+        data.edge_label_type = data.edge_type
+
 
         return data
 
