@@ -118,21 +118,30 @@ class RGCN(nn.Module):
     @torch.no_grad()
     def test(
         self,
+        train_edge_index,      
+        train_edge_type,       
         batch,
         batch_size: int,
         all_triples,
         k: int = 10,
         log: bool = True,
-        ):
+    ):
+        self.eval()
 
         head_index = batch.edge_label_index[:, 0]
         rel_type = batch.edge_label_type
         tail_index = batch.edge_label_index[:, 1]
-
-        self.eval()
-        print("Starting evaluation...")
+        
+        # Forward pass through RGCN using ONLY training graph
+        x = self.entity_embedding + self.entity_embedding_bias
+        x = F.relu(x)
+        x = self.conv1(x, train_edge_index, train_edge_type)  # ← Train graph
+        x = F.relu(x)
+        x = self.conv2(x, train_edge_index, train_edge_type)  # ← Train graph
+        
+        # Evaluate on test triples using the computed embeddings
         return self.decoder.test(
-            self.entity_embedding + self.entity_embedding_bias,
+            x,                  
             head_index,
             rel_type,
             tail_index,

@@ -70,7 +70,6 @@ class Pipeline:
                 mode="train",
                 sampling=self.train_config['sampling']['type'],
             )
-            print(batch)
             loss,scores = self.train(
                 batch=batch,
                 all_triples=self.all_triples,
@@ -103,15 +102,17 @@ class Pipeline:
             # Evaluation
             if epoch % eval_frequency == 0:
 
-                batch = self.splitter.generate_batch_triples(
+                eval_batch = self.splitter.generate_batch_triples(
                     num_nodes=self.data.num_nodes,
                     config=self.train_config,
-                    mode="train",
+                    mode="val",
                     sampling=self.train_config['sampling']['type'],
                 )
 
                 mean_rank, mrr, hits_at_k = self.model.test(
-                    batch=batch,
+                    train_edge_index=self.splitter.train_data.edge_index,
+                    train_edge_type=self.splitter.train_data.edge_type,
+                    batch=eval_batch,
                     all_triples=self.all_triples,
                     batch_size=self.train_config['evaluation']['batch_size'],
                     k=self.train_config['evaluation']['hits_at_k'],
