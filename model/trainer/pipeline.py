@@ -2,13 +2,11 @@ import torch
 from pathlib import Path
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from model.DataModel import LinkSplitter
-from utils.utils import generate_batch_triples
+import torch.nn.functional as F
 from datetime import datetime
-import numpy as np
-from utils.utils import get_edges
-from torch_geometric.loader import LinkNeighborLoader
-from types import SimpleNamespace
+from torch_geometric.utils import negative_sampling
+from utils.evaluation import compute_mrr
+
 class Pipeline:
 
     def __init__(self, model, data, config, logger):
@@ -20,9 +18,7 @@ class Pipeline:
         self.train_config = self.config.get_section('training')
         self.learning_rate = self.train_config['optimiser']['learning_rate']
         self.weight_decay = self.train_config['optimiser']['weight_decay']
-        self.device = next(model.parameters()).device
-        self.splitter = LinkSplitter(data, disjoint_train_ratio=0.4)
-        
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
         self.optimizer = torch.optim.Adam(
@@ -53,94 +49,59 @@ class Pipeline:
         eval_frequency = self.train_config.get('evaluation_frequency', 10)
         save_frequency = self.train_config.get('save_frequency', 20)
         
-        
-
         self.logger.info(f"Starting training for {max_epochs} epochs")
         
         tqdm_range = range(1, max_epochs + 1)
         tqdm_range = tqdm(tqdm_range, desc="Training", unit="batch")        
 
         for epoch in tqdm_range:
-            self.epoch = epoch
-            
+           
+            loss = self.train()
+            print(f'Epoch: {epoch:05d}, Loss: {loss:.4f}')
+            self.writer.add_scalar('loss/Train', loss, epoch)
 
-            batch = self.splitter.generate_batch_triples(
-                num_nodes=self.data.num_nodes,
-                config=self.train_config,
-                mode="train",
-                sampling=self.train_config['sampling']['type'],
-            )
-            loss,scores = self.train(
-                batch=batch,
-                all_triples=self.all_triples,
-                entity_count=self.data.num_nodes,
-                head_corrupt_prob=self.train_config['sampling']['head_corrupt_prob'],
-                negative_sampling_ratio=self.train_config['sampling']['negative_sampling_ratio'],
-            )
-            
 
-            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": loss, "auc_score": scores['auc'], "precision": scores['precision'], "recall": scores['recall'], "f1": scores['f1']})
-
-            
-            # Log training loss to TensorBoard
-            self.writer.add_scalar('Loss/Train', loss, epoch)
-            self.writer.add_scalar('AUC SCORE/Train', scores['auc'], epoch)
-            self.writer.add_scalar('Precision/Train', scores['precision'], epoch)
-            self.writer.add_scalar('Recall/Train', scores['recall'], epoch)
-            self.writer.add_scalar('F1 Score/Train', scores['f1'], epoch)
+            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": loss})
 
             # Log gradients periodically
             if epoch % 10 == 0:  # Log gradients every 10 epochs
                 self.log_model_gradients(epoch)
 
-            self.logger.info(f"Epoch {epoch} completed. Loss: {loss:.4f}")
-            self.logger.info(f"Epoch {epoch} completed. AUC Score: {scores['auc']:.4f}")
-            self.logger.info(f"Epoch {epoch} completed. Precision: {scores['precision']:.4f}")
-            self.logger.info(f"Epoch {epoch} completed. Recall: {scores['recall']:.4f}")
-            self.logger.info(f"Epoch {epoch} completed. F1 Score: {scores['f1']:.4f}")
-
             # Evaluation
             if epoch % eval_frequency == 0:
 
-                eval_batch = self.splitter.generate_batch_triples(
-                    num_nodes=self.data.num_nodes,
-                    config=self.train_config,
-                    mode="val",
-                    sampling=self.train_config['sampling']['type'],
-                )
+                valid_scores, test_scores = self.test()
 
-                mean_rank, mrr, hits_at_k = self.model.test(
-                    train_edge_index=self.splitter.train_data.edge_index,
-                    train_edge_type=self.splitter.train_data.edge_type,
-                    batch=eval_batch,
-                    all_triples=self.all_triples,
-                    batch_size=self.train_config['evaluation']['batch_size'],
-                    k=self.train_config['evaluation']['hits_at_k'],
-                )
-                self.logger.info(f"Evaluation metrics at epoch {epoch}: 'Mean Rank': {mean_rank}, 'MRR': {mrr}, 'Hits@10': {hits_at_k}")
+                self.training_history['eval_metrics'].append({
+                    "epoch": epoch,
+                    "val_mrr": valid_scores["mrr"],
+                    "val_mean_rank": valid_scores["mean_rank"],
+                    "val_hits@1": valid_scores["hits@1"],
+                    "val_hits@3": valid_scores["hits@3"],
+                    "val_hits@10": valid_scores["hits@10"],
+                    "test_mrr": test_scores["mrr"],
+                    "test_mean_rank": test_scores["mean_rank"],
+                    "test_hits@1": test_scores["hits@1"],  
+                    "test_hits@3": test_scores["hits@3"],
+                    "test_hits@10": test_scores["hits@10"],
+                })
+                self.logger.info(f"Epoch {epoch}: Val MRR = {valid_scores['mrr']:.4f}, Test MRR = {test_scores['mrr']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Mean Rank = {valid_scores['mean_rank']:.4f}, Test Mean Rank = {test_scores['mean_rank']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Hits@1 = {valid_scores['hits@1']:.4f}, Test Hits@1 = {test_scores['hits@1']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Hits@3 = {valid_scores['hits@3']:.4f}, Test Hits@3 = {test_scores['hits@3']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Hits@10 = {valid_scores['hits@10']:.4f}, Test Hits@10 = {test_scores['hits@10']:.4f}")
 
-                self.writer.add_scalar("LP/MRR", float(mrr), epoch)
-                self.writer.add_scalar("LP/Hits@10", float(hits_at_k), epoch)
-                self.writer.add_scalar("LP/Mean_Rank", float(mean_rank), epoch)
-                # self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_auc_score})
-
-
-                eval_loss_value, eval_scores = self.validation_loss()
-
-                self.training_history['eval_metrics'].append({"epoch": epoch, "metrics": {'Mean Rank': mean_rank, 'MRR': mrr, 'Hits@10': hits_at_k}, "eval_loss": eval_loss_value, "eval_auc_score": eval_scores['auc'], "eval_precision": eval_scores['precision'], "eval_recall": eval_scores['recall'], "eval_f1": eval_scores['f1']})
-
-                # Log evaluation loss to TensorBoard
-                self.writer.add_scalar('Loss/Validation', eval_loss_value, epoch)
-                self.writer.add_scalar('AUC SCORE/Validation', eval_scores['auc'], epoch)
-                self.writer.add_scalar('Precision/Validation', eval_scores['precision'], epoch)
-                self.writer.add_scalar('Recall/Validation', eval_scores['recall'], epoch)
-                self.writer.add_scalar('F1 Score/Validation', eval_scores['f1'], epoch)
-                
-                self.logger.info(f"Evaluation Loss at epoch {epoch}: {eval_loss_value}")
-                self.logger.info(f"Evaluation AUC Score at epoch {epoch}: {eval_scores['auc']}")
-                self.logger.info(f"Evaluation Precision at epoch {epoch}: {eval_scores['precision']}")
-                self.logger.info(f"Evaluation Recall at epoch {epoch}: {eval_scores['recall']}")
-                self.logger.info(f"Evaluation F1 Score at epoch {epoch}: {eval_scores['f1']}")
+                # Log evaluation metrics to TensorBoard
+                self.writer.add_scalar('MRR/Validation', valid_scores['mrr'], epoch)
+                self.writer.add_scalar('MRR/Test', test_scores['mrr'], epoch)
+                self.writer.add_scalar('Mean_Rank/Validation', valid_scores['mean_rank'], epoch)
+                self.writer.add_scalar('Mean_Rank/Test', test_scores['mean_rank'], epoch)
+                self.writer.add_scalar('Hits@1/Validation', valid_scores['hits@1'], epoch)
+                self.writer.add_scalar('Hits@1/Test', test_scores['hits@1'], epoch)
+                self.writer.add_scalar('Hits@3/Validation', valid_scores['hits@3'], epoch)
+                self.writer.add_scalar('Hits@3/Test', test_scores['hits@3'], epoch)
+                self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
+                self.writer.add_scalar('Hits@10/Test', test_scores['hits@10'], epoch)
 
             # Save checkpoint
             if epoch % save_frequency == 0:
@@ -153,21 +114,46 @@ class Pipeline:
 
 
 
-    def train(self, batch,all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio):
+    def train(self):
         """
         Train the model on a single batch.
         """
 
         self.model.train()
         self.optimizer.zero_grad()
-        loss, scores = self.model(batch, all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio) # Forward pass
-        # Backward pass
+
+        z = self.model.encode(self.data.edge_index, self.data.edge_type)
+
+        pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
+
+        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
+        neg_out = self.model.decode(z, neg_edge_index, self.data.train_edge_type)
+
+        out = torch.cat([pos_out, neg_out])
+        gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
+        cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
+        reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
+        loss = cross_entropy_loss + 1e-2 * reg_loss
+
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.)
         self.optimizer.step()
 
-        return loss, scores
+        loss.detach()
+        return float(loss)
 
     
+    
+    @torch.no_grad()
+    def test(self):
+
+        self.model.eval()
+        z = self.model.encode(self.data.edge_index, self.data.edge_type)
+        valid_scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
+        test_scores = compute_mrr(z, self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
+
+        return valid_scores, test_scores
+
     def log_model_gradients(self, epoch):
         """Log gradient norms to TensorBoard for monitoring."""
         total_norm = 0
@@ -207,22 +193,7 @@ class Pipeline:
                 self.writer.add_scalar(f'Hyperparameters/{key}', value, 0)
 
     
-    def validation_loss(self):
-        """
-        Evaluate average loss on a validation/test split produced by RandomLinkSplit.
-        """
-        self.model.eval()
-        with torch.no_grad():
 
-            batch = self.splitter.generate_batch_triples(
-                num_nodes=self.data.num_nodes,
-                config=self.train_config,
-                mode="val",
-                sampling=self.train_config['sampling']['type'],
-            )
-
-            val_loss,val_scores = self.model(batch,self.all_triples,self.data.num_nodes, head_corrupt_prob=self.train_config['sampling']['head_corrupt_prob'],negative_sampling_ratio=self.train_config['sampling']['negative_sampling_ratio'],)
-            return val_loss,val_scores
 
 
     def save_checkpoint(self, epoch):

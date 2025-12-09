@@ -69,22 +69,22 @@ def get_edges(triplets):
     
     return edge_index, edge_type
 
-def negative_sampling(batch, num_nodes, head_corrupt_prob, device='mps'):
-    """ Samples negative examples in a batch of triples. Randomly corrupts either heads or tails."""
-    bs, ns, _ = batch.size()
+# def negative_sampling(batch, num_nodes, head_corrupt_prob, device='mps'):
+#     """ Samples negative examples in a batch of triples. Randomly corrupts either heads or tails."""
+#     bs, ns, _ = batch.size()
 
-    # new entities to insert
-    corruptions = torch.randint(size=(bs * ns,),low=0, high=num_nodes, dtype=torch.long, device=device)
+#     # new entities to insert
+#     corruptions = torch.randint(size=(bs * ns,),low=0, high=num_nodes, dtype=torch.long, device=device)
 
-    # boolean mask for entries to corrupt
-    mask = torch.bernoulli(torch.empty(
-        size=(bs, ns, 1), dtype=torch.float, device=device).fill_(head_corrupt_prob)).to(torch.bool)
-    zeros = torch.zeros(size=(bs, ns, 1), dtype=torch.bool, device=device)
-    mask = torch.cat([mask, zeros, ~mask], dim=2)
+#     # boolean mask for entries to corrupt
+#     mask = torch.bernoulli(torch.empty(
+#         size=(bs, ns, 1), dtype=torch.float, device=device).fill_(head_corrupt_prob)).to(torch.bool)
+#     zeros = torch.zeros(size=(bs, ns, 1), dtype=torch.bool, device=device)
+#     mask = torch.cat([mask, zeros, ~mask], dim=2)
 
-    batch[mask] = corruptions
+#     batch[mask] = corruptions
 
-    return batch.view(bs * ns, -1)
+#     return batch.view(bs * ns, -1)
 
 
 def edge_neighborhood(edge_index,edge_type, sample_size=30000, num_nodes=None, return_indices=False):
@@ -184,3 +184,14 @@ def generate_batch_triples(triples, num_nodes, config, mode, sampling="sample"):
     
     return batch
 
+def negative_sampling(edge_index, num_nodes):
+    # Sample edges by corrupting either the subject or the object of each edge.
+    mask_1 = torch.rand(edge_index.size(1)) < 0.5
+    mask_2 = ~mask_1
+
+    neg_edge_index = edge_index.clone()
+    neg_edge_index[0, mask_1] = torch.randint(num_nodes, (mask_1.sum(), ),
+                                              device=neg_edge_index.device)
+    neg_edge_index[1, mask_2] = torch.randint(num_nodes, (mask_2.sum(), ),
+                                              device=neg_edge_index.device)
+    return neg_edge_index

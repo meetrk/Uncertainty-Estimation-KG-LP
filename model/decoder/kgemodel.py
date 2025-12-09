@@ -44,9 +44,7 @@ class KGEModel(torch.nn.Module):
     def forward(
         self,
         X: Tensor,
-        head_index: Tensor,
-        rel_type: Tensor,
-        tail_index: Tensor,
+        edge_index, edge_type
     ) -> Tensor:
         r"""Returns the score for the given triplet.
 

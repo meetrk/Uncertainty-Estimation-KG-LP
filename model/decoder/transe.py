@@ -58,21 +58,19 @@ class TransE(KGEModel):
 
     def reset_parameters(self):
         bound = 6. / math.sqrt(self.hidden_channels)
-        torch.nn.init.uniform_(self.rel_emb.weight, -bound, bound)
-        F.normalize(self.rel_emb.weight.data, p=self.p_norm, dim=-1,
-                    out=self.rel_emb.weight.data)
+        torch.nn.init.uniform_(self.rel_emb, -bound, bound)
+        F.normalize(self.rel_emb.data, p=self.p_norm, dim=-1,
+                    out=self.rel_emb.data)
 
     def forward(
         self,
         X: Tensor,
-        head_index: Tensor,
-        rel_type: Tensor,
-        tail_index: Tensor,
+        edge_index, edge_type
     ) -> Tensor:
 
-        head = X[head_index]
-        rel = self.rel_emb(rel_type)
-        tail = X[tail_index]
+        head = X[edge_index[0]]
+        rel = self.rel_emb[edge_type]
+        tail = X[edge_index[1]]
 
         head = F.normalize(head, p=self.p_norm, dim=-1)
         tail = F.normalize(tail, p=self.p_norm, dim=-1)

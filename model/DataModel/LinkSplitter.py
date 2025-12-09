@@ -1,6 +1,4 @@
-from numpy import indices
 from torch_geometric.data import Data
-from torch import Tensor
 import torch
 from utils.utils import edge_neighborhood
 
@@ -53,7 +51,8 @@ class LinkSplitter:
     
     def _add_reverse_edges(
         self,
-        data: Data
+        data: Data,
+        mode: str = "train"
     ):
         edge_index = data.edge_index 
         rev_edge_index = torch.flip(edge_index,[0])
@@ -61,8 +60,9 @@ class LinkSplitter:
         rev_edge_type = data.edge_type + self.data.num_relations
         data.edge_type = torch.concat([data.edge_type,rev_edge_type],dim=0)
 
-        data.edge_label_index = torch.concat([data.edge_label_index,torch.flip(data.edge_label_index,[0])],dim=1)
-        data.edge_label_type = torch.concat([data.edge_label_type,data.edge_label_type + self.data.num_relations],dim=0)
+        if mode == "train":
+            data.edge_label_index = torch.concat([data.edge_label_index,torch.flip(data.edge_label_index,[0])],dim=1)
+            data.edge_label_type = torch.concat([data.edge_label_type,data.edge_label_type + self.data.num_relations],dim=0)
 
         data.num_relations = len(data.edge_type.unique())
        
@@ -100,23 +100,39 @@ class LinkSplitter:
 
 
     def _split_mp_and_supervision(
-        self, data: Data
-    ):
-        """Splits the edges into message passing and supervision sets"""
+            self, data: Data
+        ):
+            """
+            Splits the edges into message passing and supervision sets following 
+            link prediction dropout strategy.
+            
+            Message Passing: Uses a subset of edges (defined by the ratio).
+            Supervision: Uses ALL edges (reconstructing the full graph).
+            """
 
-        edge_index = data.edge_index
-        edge_type = data.edge_type
-        num_edges = edge_index.size(1)
-        indices = torch.randperm(num_edges)
-        mask = indices < self.disjoint_train_ratio * num_edges
+            edge_index = data.edge_index
+            edge_type = data.edge_type
+            num_edges = edge_index.size(1)
 
-        data.edge_index = edge_index[:, mask]
-        data.edge_type = edge_type[mask]
+            # 1. Supervision Set: MUST include ALL edges (Positives)
+            # We preserve the full graph structure here to train the model 
+            # to reconstruct even the edges that are dropped from MP.
+            data.edge_label_index = edge_index.clone()
+            data.edge_label_type = edge_type.clone()
 
-        data.edge_label_index = edge_index[:, ~mask]
-        data.edge_label_type = edge_type[~mask]
+            # 2. Message Passing Set: Apply Edge Dropout
+            # We select a random subset of edges to act as the "context" graph.
+            indices = torch.randperm(num_edges)
+            
+            # Assuming self.disjoint_train_ratio acts as the 'keep_prob' (e.g., 0.5 to keep 50%)
+            # If your ratio represents the 'dropout' amount, change '<' to '>'.
+            mask = indices < int(self.disjoint_train_ratio * num_edges)
 
-        return data
+            data.edge_index = edge_index[:, mask]
+            data.edge_type = edge_type[mask]
+
+            return data
+    
 
     def generate_batch_triples(
         self,
@@ -126,6 +142,8 @@ class LinkSplitter:
         sampling: str = "batch",
     ):
         """ Generate batch triples from data """
+        
+        # 1. Determine source data based on mode
         if mode == "train":
             edge_index = self.train_data.edge_index
             edge_type = self.train_data.edge_type
@@ -133,32 +151,87 @@ class LinkSplitter:
         elif mode == "val":
             edge_index = self.val_data.edge_index
             edge_type = self.val_data.edge_type
-            batch_size = edge_index.size(1)
+            sampling = "full"
         elif mode == "test":
             edge_index = self.test_data.edge_index
             edge_type = self.test_data.edge_type
-            batch_size = edge_index.size(1)
+            sampling = "full"
         else:
             raise ValueError(f"Invalid mode: {mode}")
 
+        # 2. CRITICAL: Evaluation Mode
+        if mode == "val":
+            batch = Data()
+            batch.edge_label_index = edge_index
+            batch.edge_label_type = edge_type
+            
+            # Context: Training Graph
+            # Must augment this with inverses/self-loops so it matches training topology
+            context_data = Data(
+                edge_index=self.train_data.edge_index, 
+                edge_type=self.train_data.edge_type,
+                num_nodes=num_nodes # Pass num_nodes to ensure self-loops are correct
+            )
+            # Temporarily set num_relations for the helper functions
+            context_data.num_relations = self.data.num_relations
+
+            context_data = self._add_reverse_edges(context_data, mode="val")
+            context_data = self._self_loop_edges(context_data)
+            
+            batch.edge_index = context_data.edge_index
+            batch.edge_type = context_data.edge_type
+            return batch
+
+        if mode == "test":
+            batch = Data()
+            batch.edge_label_index = edge_index
+            batch.edge_label_type = edge_type
+            
+            # Context: Training + Validation Graph
+            # FIX: Concatenate along dim=1 for edge_index
+            combined_edge_index = torch.cat([self.train_data.edge_index, self.val_data.edge_index], dim=1)
+            combined_edge_type = torch.cat([self.train_data.edge_type, self.val_data.edge_type], dim=0)
+            
+            context_data = Data(
+                edge_index=combined_edge_index,
+                edge_type=combined_edge_type,
+                num_nodes=num_nodes
+            )
+            context_data.num_relations = self.data.num_relations
+
+            context_data = self._add_reverse_edges(context_data, mode="test")
+            context_data = self._self_loop_edges(context_data)
+
+            batch.edge_index = context_data.edge_index
+            batch.edge_type = context_data.edge_type
+            return batch
+
+        # 3. Training Mode
         triples = torch.stack([edge_index[0], edge_type, edge_index[1]], dim=1)
 
         if sampling == "edge-neighborhood":
-            
             if batch_size > triples.size(0):
                 batch_size = triples.size(0)
-            indices = edge_neighborhood(edge_index=edge_index, edge_type=edge_type, sample_size=batch_size, num_nodes=num_nodes, return_indices=True)
+                
+            indices = edge_neighborhood(
+                edge_index=edge_index, 
+                edge_type=edge_type, 
+                sample_size=batch_size, 
+                num_nodes=num_nodes, 
+                return_indices=True
+            )
+            
             batch = Data()
-            batch.edge_index = torch.stack([triples[indices][:,0],triples[indices][:,2]], dim=0)
-            batch.edge_type = triples[indices][:,1]
+            batch.edge_index = torch.stack([triples[indices][:, 0], triples[indices][:, 2]], dim=0)
+            batch.edge_type = triples[indices][:, 1]
             batch = self.add_edges(batch)
 
         elif sampling == "sample":
-            sample_size = config['sampling']['sample_size']
+            sample_size = config['sampling'].get('sample_size', batch_size)
             indices = torch.randperm(triples.size(0))[:sample_size]
             batch = Data()
-            batch.edge_index = torch.stack([triples[indices][0],triples[indices][2]], dim=0)
-            batch.edge_type = triples[indices][1]
+            batch.edge_index = torch.stack([triples[indices][:, 0], triples[indices][:, 2]], dim=0)
+            batch.edge_type = triples[indices][:, 1]
             batch = self.add_edges(batch)
 
         elif sampling == "full":

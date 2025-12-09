@@ -56,16 +56,13 @@ class DistMult(KGEModel):
     def forward(
         self,
         X: Tensor,
-        head_index: Tensor,
-        rel_type: Tensor,
-        tail_index: Tensor,
+        edge_index, edge_type
     ) -> Tensor:
 
 
-        head = X[head_index]
-        rel = self.rel_emb[rel_type]
-        tail = X[tail_index]
+        head, tail = X[edge_index[0]], X[edge_index[1]]
+        rel = self.rel_emb[edge_type]
 
-        return (head * rel * tail).sum(dim=-1)
+        return torch.sum(head * rel * tail, dim=1)
 
     

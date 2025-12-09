@@ -54,3 +54,66 @@ def filter_scores(scores, batch, true_triples, head=True):
         indices = torch.tensor(indices, device=device)
         scores[indices[:, 0], indices[:, 1]] = float('-inf')
 
+@torch.no_grad()
+def compute_rank(ranks):
+    # fair ranking prediction as the average
+    # of optimistic and pessimistic ranking
+    true = ranks[0]
+    optimistic = (ranks > true).sum() + 1
+    pessimistic = (ranks >= true).sum()
+    return (optimistic + pessimistic).float() * 0.5
+
+
+@torch.no_grad()
+def compute_mrr(z, edge_index, edge_type, data, model):
+    ranks = []
+    for i in tqdm(range(edge_type.numel())):
+        (src, dst), rel = edge_index[:, i], edge_type[i]
+
+        # Try all nodes as tails, but delete true triplets:
+        tail_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+        for (heads, tails), types in [
+            (data.train_edge_index, data.train_edge_type),
+            (data.valid_edge_index, data.valid_edge_type),
+            (data.test_edge_index, data.test_edge_type),
+        ]:
+            tail_mask[tails[(heads == src) & (types == rel)]] = False
+
+        tail = torch.arange(data.num_nodes)[tail_mask]
+        tail = torch.cat([torch.tensor([dst]), tail])
+        head = torch.full_like(tail, fill_value=src)
+        eval_edge_index = torch.stack([head, tail], dim=0)
+        eval_edge_type = torch.full_like(tail, fill_value=rel)
+
+        out = model.decode(z, eval_edge_index, eval_edge_type)
+        rank = compute_rank(out)
+        ranks.append(rank)
+
+        # Try all nodes as heads, but delete true triplets:
+        head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+        for (heads, tails), types in [
+            (data.train_edge_index, data.train_edge_type),
+            (data.valid_edge_index, data.valid_edge_type),
+            (data.test_edge_index, data.test_edge_type),
+        ]:
+            head_mask[heads[(tails == dst) & (types == rel)]] = False
+
+        head = torch.arange(data.num_nodes)[head_mask]
+        head = torch.cat([torch.tensor([src]), head])
+        tail = torch.full_like(head, fill_value=dst)
+        eval_edge_index = torch.stack([head, tail], dim=0)
+        eval_edge_type = torch.full_like(head, fill_value=rel)
+
+        out = model.decode(z, eval_edge_index, eval_edge_type)
+        rank = compute_rank(out)
+        ranks.append(rank)
+
+    scores = {
+        'mrr' : (1. / torch.tensor(ranks, dtype=torch.float)).mean(),
+        'mean_rank': torch.tensor(ranks, dtype=torch.float).mean(),
+        'hits@1': (torch.tensor(ranks, dtype=torch.float) <= 1).float().mean(),
+        'hits@3': (torch.tensor(ranks, dtype=torch.float) <= 3).float().mean(),
+        'hits@10': (torch.tensor(ranks, dtype=torch.float) <= 10).float().mean(),
+    }
+
+    return scores

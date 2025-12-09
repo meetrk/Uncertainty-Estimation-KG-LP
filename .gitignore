@@ -10,3 +10,4 @@ runs/
 training.log
 dataset/
 notebooks/
+data/
