@@ -50,7 +50,7 @@ class RGCN(nn.Module):
         self.conv1 = RGCNConv(
             in_channels=self.embedding_dim,
             out_channels=self.hidden_layer_size,
-            num_relations=self.num_relations * 2 + 1,
+            num_relations=self.num_relations,
             num_bases=self.num_bases,
             aggr="add",
             bias=False
@@ -58,7 +58,7 @@ class RGCN(nn.Module):
         self.conv2 = RGCNConv(
             in_channels=self.embedding_dim,
             out_channels=self.hidden_layer_size,
-            num_relations=self.num_relations * 2 + 1,
+            num_relations=self.num_relations,
             num_bases=self.num_bases,
             aggr="add",
             bias=False
