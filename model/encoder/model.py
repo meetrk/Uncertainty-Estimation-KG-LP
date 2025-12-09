@@ -56,8 +56,8 @@ class RGCN(nn.Module):
             bias=False
         )
         self.conv2 = RGCNConv(
-            in_channels=self.embedding_dim,
-            out_channels=self.hidden_layer_size,
+            in_channels=self.hidden_layer_size,
+            out_channels=self.embedding_dim,
             num_relations=self.num_relations,
             num_bases=self.num_bases,
             aggr="add",
