@@ -1,3 +1,4 @@
+from pyexpat import model
 import torch
 from pathlib import Path
 from tqdm import tqdm
@@ -133,9 +134,13 @@ class Pipeline:
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
 
         pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
+        if self.train_config['sampling']['negative_sampling_ratio'] > 1:
+            neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes, self.train_config['sampling']['negative_sampling_ratio'] * self.data.train_edge_index.size(1))
+            neg_edge_type = self.data.train_edge_type.repeat(self.train_config['sampling']['negative_sampling_ratio'])
+        else:
+            neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
+            neg_edge_type = self.data.train_edge_type
 
-        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes, self.train_config['sampling']['negative_sampling_ratio'] * self.data.train_edge_index.size(1))
-        neg_edge_type = self.data.train_edge_type.repeat(self.train_config['sampling']['negative_sampling_ratio'])
         neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
 
         out = torch.cat([pos_out, neg_out])
@@ -148,11 +153,40 @@ class Pipeline:
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.)
         self.optimizer.step()
 
-        loss.detach()
+        loss = loss.detach()
         return float(loss)
 
-    
-    
+    @torch.no_grad()
+    def validate(self):
+        """
+        Validate the model on the validation set.
+        """
+        self.model.eval()
+        self.optimizer.zero_grad()
+
+        # dropout some edge randomly for training
+        if self.train_config['sampling']['edge_dropout'] > 0:
+            self.data.edge_index, self.data.edge_type = dropout_edges(self.data.edge_index, self.data.edge_type, self.train_config['sampling']['edge_dropout'])
+
+        z = self.model.encode(self.data.edge_index, self.data.edge_type)
+
+        pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
+
+        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
+        neg_out = self.model.decode(z, neg_edge_index, self.data.train_edge_type)
+
+        out = torch.cat([pos_out, neg_out])
+        gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
+        cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
+        reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
+        loss = cross_entropy_loss + self.model_config['decoder']['l2_penalty'] * reg_loss
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.)
+        self.optimizer.step()
+
+        loss = loss.detach()
+        return float(loss)
     @torch.no_grad()
     def test(self, test = True):
 

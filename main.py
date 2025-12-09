@@ -84,14 +84,12 @@ def main():
         data['test_edge_index'] = data.edge_index[:,data.test_mask]
         data['test_edge_type'] = data.edge_type[data.test_mask]     
         # Add reverse edges
-        edge_index = data.edge_index 
+        edge_index = data.train_edge_index
         rev_edge_index = torch.flip(edge_index,[0])
         data.edge_index = torch.concat([edge_index,rev_edge_index],dim=1)
-        rev_edge_type = data.edge_type + data.num_relations
-        data.edge_type = torch.concat([data.edge_type,rev_edge_type],dim=0)
+        rev_edge_type = data.train_edge_type + data.num_relations
+        data.edge_type = torch.concat([data.train_edge_type,rev_edge_type],dim=0)
         data.num_relations = len(data.edge_type.unique())
-
-
         data.to(device)
 
     elif dataset_config['name'] == "FB15k-237":
@@ -101,7 +99,8 @@ def main():
         data['num_relations'] = dataset.num_relations
     else:
         raise ValueError("Unsupported dataset specified")
-
+    logger.info(f"Dataset '{dataset_config['name']}' loaded successfully.")
+    logger.info(f"Number of nodes: {data}")
     # Initialize decoder
     if config_loader.get_section('model')['decoder']['type'] == 'DistMult':
         decoder = DistMult
