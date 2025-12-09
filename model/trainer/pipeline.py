@@ -70,7 +70,10 @@ class Pipeline:
             # Evaluation
             if epoch % eval_frequency == 0:
 
-                valid_scores, test_scores = self.test()
+                valid_scores, test_scores = self.test(test=False)
+
+                if test_scores is None:
+                    test_scores = {"mrr": 0, "mean_rank": 0, "hits@1": 0, "hits@3": 0, "hits@10": 0}
 
                 self.training_history['eval_metrics'].append({
                     "epoch": epoch,
@@ -145,14 +148,16 @@ class Pipeline:
     
     
     @torch.no_grad()
-    def test(self):
+    def test(self, test = True):
 
         self.model.eval()
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
         valid_scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
-        test_scores = compute_mrr(z, self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
+        if test:
+            test_scores = compute_mrr(z, self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
+            return valid_scores, test_scores
 
-        return valid_scores, test_scores
+        return valid_scores, None
 
     def log_model_gradients(self, epoch):
         """Log gradient norms to TensorBoard for monitoring."""
