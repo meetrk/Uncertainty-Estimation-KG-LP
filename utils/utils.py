@@ -195,3 +195,11 @@ def negative_sampling(edge_index, num_nodes):
     neg_edge_index[1, mask_2] = torch.randint(num_nodes, (mask_2.sum(), ),
                                               device=neg_edge_index.device)
     return neg_edge_index
+
+def dropout_edges(edge_index, edge_type, dropout_ratio):
+    
+    num_edges = edge_index.size(1)
+    mask = torch.rand(num_edges, device=edge_index.device) >= dropout_ratio
+    dropped_edge_index = edge_index[:, mask]
+    dropped_edge_type = edge_type[mask]
+    return dropped_edge_index, dropped_edge_type

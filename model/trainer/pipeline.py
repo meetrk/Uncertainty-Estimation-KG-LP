@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from datetime import datetime
 from torch_geometric.utils import negative_sampling
 from utils.evaluation import compute_mrr
+from utils.utils import dropout_edges
 
 class Pipeline:
 
@@ -58,7 +59,7 @@ class Pipeline:
            
             loss = self.train()
             print(f'Epoch: {epoch:05d}, Loss: {loss:.4f}')
-            self.writer.add_scalar('loss/Train', loss, epoch)
+            self.writer.add_scalar('Loss/Train', loss, epoch)
 
 
             self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": loss})
@@ -125,18 +126,23 @@ class Pipeline:
         self.model.train()
         self.optimizer.zero_grad()
 
+        # dropout some edge randomly for training
+        if self.train_config['sampling']['edge_dropout'] > 0:
+            self.data.edge_index, self.data.edge_type = dropout_edges(self.data.edge_index, self.data.edge_type, self.train_config['sampling']['edge_dropout'])
+
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
 
         pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
 
-        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
-        neg_out = self.model.decode(z, neg_edge_index, self.data.train_edge_type)
+        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes, self.train_config['sampling']['negative_sampling_ratio'] * self.data.train_edge_index.size(1))
+        neg_edge_type = self.data.train_edge_type.repeat(self.train_config['sampling']['negative_sampling_ratio'])
+        neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
 
         out = torch.cat([pos_out, neg_out])
         gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
         cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
         reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
-        loss = cross_entropy_loss + 1e-2 * reg_loss
+        loss = cross_entropy_loss + self.model_config['decoder']['l2_penalty'] * reg_loss
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.)

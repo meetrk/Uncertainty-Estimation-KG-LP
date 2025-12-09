@@ -24,10 +24,8 @@ model:
 training:
   epochs: 200
   sampling:
-    batch_size: 30000
-    type: edge-neighborhood
     negative_sampling_ratio: 10
-    head_corrupt_prob: 0.5
+    edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
     weight_decay: 0.0001
