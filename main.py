@@ -129,9 +129,10 @@ def main():
 
     logger.info(f"Encoder architecture:\n{encoder}")
 
+    logger.info(f"Decoder architecture:\n{decoder}")
 
     model = GAE(encoder=encoder, decoder=decoder).to(device)
-    
+    logger.info(f"GAE architecture:\n{model}")
     # Initialize trainer
     pipeline = Pipeline(
         model=model,

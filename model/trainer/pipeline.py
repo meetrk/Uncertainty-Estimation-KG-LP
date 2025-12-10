@@ -130,29 +130,28 @@ class Pipeline:
         self.optimizer.zero_grad()
 
         # dropout some edge randomly for training
-        if self.train_config['sampling']['edge_dropout'] > 0:
-            self.data.edge_index, self.data.edge_type = dropout_edges(self.data.edge_index, self.data.edge_type, self.train_config['sampling']['edge_dropout'])
+        # if self.train_config['sampling']['edge_dropout'] > 0:
+        #     self.data.edge_index, self.data.edge_type = dropout_edges(self.data.edge_index, self.data.edge_type, self.train_config['sampling']['edge_dropout'])
+
+        z = self.model.encode(self.data.edge_index, self.data.edge_type)
 
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
 
         pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
 
-
-        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes)
-        neg_out = self.model.decode(z, neg_edge_index, self.data.valid_edge_type)
-
+        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
+        neg_out = self.model.decode(z, neg_edge_index, self.data.train_edge_type)
 
         out = torch.cat([pos_out, neg_out])
         gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
         cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
         reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
-        loss = cross_entropy_loss + self.model_config['decoder']['l2_penalty'] * reg_loss
-
+        loss = cross_entropy_loss + 1e-2 * reg_loss
+        
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.)
         self.optimizer.step()
-
-        loss = loss.detach()
+        loss.detach_()
         return float(loss)
 
     @torch.no_grad()
@@ -175,7 +174,9 @@ class Pipeline:
         cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
         reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
         loss = cross_entropy_loss + self.model_config['decoder']['l2_penalty'] * reg_loss
+
         return float(loss)
+    
     @torch.no_grad()
     def test(self, test = True):
 
@@ -227,9 +228,6 @@ class Pipeline:
                 self.writer.add_scalar(f'Hyperparameters/{key}', value, 0)
 
     
-
-
-
     def save_checkpoint(self, epoch):
         """Save model checkpoint."""
         checkpoint = {

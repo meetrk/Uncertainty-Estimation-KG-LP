@@ -1,13 +1,8 @@
 from model.encoder.layer import RGCNLayer
-from torch.nn.modules import Module
 from torch import nn
 import torch.nn.functional as F
 import torch
-from model.decoder.distmult import DistMult
-from utils.utils import get_triples
-from sklearn.metrics import roc_auc_score
 from torch_geometric.nn.conv import RGCNConv
-from torch import Tensor
 
 
 class RGCN(nn.Module):
