@@ -25,7 +25,7 @@ training:
   epochs: 500
   sampling:
     negative_sampling_ratio: 5
-    edge_dropout: 0.01
+    edge_dropout: 0.1
   optimiser:
     learning_rate: 0.01
     weight_decay: 0.0001
