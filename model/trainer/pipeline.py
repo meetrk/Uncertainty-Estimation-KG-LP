@@ -131,8 +131,8 @@ class Pipeline:
         self.optimizer.zero_grad()
 
         # dropout some edge randomly for training
-        # if self.train_config['sampling']['edge_dropout'] > 0:
-        #     self.data.edge_index, self.data.edge_type = dropout_edges(self.data.edge_index, self.data.edge_type, self.train_config['sampling']['edge_dropout'])
+        if self.train_config['sampling']['edge_dropout'] > 0:
+            self.data.edge_index, self.data.edge_type = dropout_edges(self.data.edge_index, self.data.edge_type, self.train_config['sampling']['edge_dropout'])
 
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
 
