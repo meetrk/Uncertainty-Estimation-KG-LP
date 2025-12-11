@@ -73,24 +73,9 @@ def main():
 
     if dataset_config['name'] == "WN18RR":
         path = osp.join('.', 'data', 'RLPD')
-        dataset = WordNet18RR(path)
-        
-        data = dataset[0]
-        data['num_relations'] = data['edge_type'].max().item() + 1
-        data['train_edge_index'] = data.edge_index[:,data.train_mask]
-        data['train_edge_type'] = data.edge_type[data.train_mask]
-        data['valid_edge_index'] = data.edge_index[:,data.val_mask]
-        data['valid_edge_type'] = data.edge_type[data.val_mask]   
-        data['test_edge_index'] = data.edge_index[:,data.test_mask]
-        data['test_edge_type'] = data.edge_type[data.test_mask]     
-        # Add reverse edges
-        edge_index = data.train_edge_index
-        rev_edge_index = torch.flip(edge_index,[0])
-        data.edge_index = torch.concat([edge_index,rev_edge_index],dim=1)
-        rev_edge_type = data.train_edge_type + data.num_relations
-        data.edge_type = torch.concat([data.train_edge_type,rev_edge_type],dim=0)
-        data.num_relations = len(data.edge_type.unique())
-        data.to(device)
+        dataset = RelLinkPredDataset(path, 'WN18RR')
+        data = dataset[0].to(device)
+        data['num_relations'] = dataset.num_relations
 
     elif dataset_config['name'] == "FB15k-237":
         path = osp.join('.', 'data', 'RLPD')
@@ -111,7 +96,7 @@ def main():
 
     decoder = decoder(
         num_nodes=data.num_nodes,
-        num_relations=data.num_relations // 2,
+        num_relations=dataset.num_relations // 2,
         hidden_channels=config_loader.get_section('model')['encoder']['embedding_dim'],
     )
     logger.info(f"Decoder initialized: {decoder}")
@@ -119,7 +104,7 @@ def main():
 
     encoder = RGCN(
         num_nodes=data.num_nodes,
-        num_relations=data.num_relations,
+        num_relations=dataset.num_relations,
         model_config=model_config
     )
     logger.info("Encoder initialized successfully.")

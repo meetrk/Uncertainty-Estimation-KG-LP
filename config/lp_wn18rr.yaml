@@ -5,11 +5,11 @@ dataset:
 model:
   encoder:
     type: RGCN
-    hidden_layer_size: 200
-    embedding_dim: 200
+    hidden_layer_size: 500
+    embedding_dim: 500
     num_layers: 2
     dropout: 0.2
-    num_bases : 4
+    num_bases : 5
     w_init: schlichtkrull-normal
     w_gain: false
     b_init: zeros
@@ -22,10 +22,10 @@ model:
     b_init: false
   
 training:
-  epochs: 10000
+  epochs: 500
   sampling:
     negative_sampling_ratio: 5
-    edge_dropout: 0.2
+    edge_dropout: 0
   optimiser:
     learning_rate: 0.01
     weight_decay: 0.0001

@@ -5,7 +5,7 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 from datetime import datetime
-from torch_geometric.utils import negative_sampling
+from utils.utils import negative_sampling
 from utils.evaluation import compute_mrr
 from utils.utils import dropout_edges
 
@@ -26,7 +26,7 @@ class Pipeline:
         self.optimizer = torch.optim.Adam(
             model.parameters(), 
             lr=self.learning_rate, 
-            weight_decay=self.weight_decay
+            # weight_decay=self.weight_decay
         )
         self.all_triples = torch.stack([
                     self.data.edge_index[0],
@@ -59,7 +59,8 @@ class Pipeline:
         for epoch in tqdm_range:
            
             loss = self.train()
-            val_loss = self.validate()
+            # val_loss = self.validate()
+            val_loss = 0
             print(f'Epoch: {epoch:05d}, Loss: {loss:.4f}, Val Loss: {val_loss:.4f}')
             self.writer.add_scalar('Loss/Train', loss, epoch)
             self.writer.add_scalar('Loss/Validation', val_loss, epoch)
@@ -135,8 +136,6 @@ class Pipeline:
 
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
 
-        z = self.model.encode(self.data.edge_index, self.data.edge_type)
-
         pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
 
         neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
@@ -147,11 +146,11 @@ class Pipeline:
         cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
         reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
         loss = cross_entropy_loss + 1e-2 * reg_loss
-        
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.)
         self.optimizer.step()
-        loss.detach_()
+
         return float(loss)
 
     @torch.no_grad()
