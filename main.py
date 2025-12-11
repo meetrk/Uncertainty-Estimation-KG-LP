@@ -9,7 +9,7 @@ from model.decoder.transe import TransE
 from model.trainer.pipeline import Pipeline
 import os.path as osp
 from torch_geometric.datasets.word_net import WordNet18RR
-from torch_geometric.datasets import RelLinkPredDataset
+from misc.rel_link_pred_dataset import RelLinkPredDataset
 import torch
 from torch_geometric.nn import GAE
 
