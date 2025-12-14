@@ -117,3 +117,18 @@ def compute_mrr(z, edge_index, edge_type, data, model):
     }
 
     return scores
+
+def compute_uncertainty(y_true, y_probs):
+    from sklearn.calibration import calibration_curve
+    from sklearn.metrics import brier_score_loss
+
+    # 1. Brier Score
+    score = brier_score_loss(y_true, y_probs)
+
+    # 2. Reliability Diagram Data
+    prob_true, prob_pred = calibration_curve(y_true, y_probs, n_bins=10)
+
+    return {
+        'brier_score': score,
+        'reliability_curve': (prob_true, prob_pred)
+    }

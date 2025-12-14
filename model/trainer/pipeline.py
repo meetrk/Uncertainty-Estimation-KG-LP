@@ -1,12 +1,14 @@
 from pyexpat import model
 import torch
 from pathlib import Path
+import torch
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 from datetime import datetime
-from utils.utils import negative_sampling
-from utils.evaluation import compute_mrr
+# from utils.utils import negative_sampling
+from torch_geometric.utils import negative_sampling
+from utils.evaluation import compute_mrr,compute_uncertainty
 from utils.utils import dropout_edges
 
 class Pipeline:
@@ -50,6 +52,9 @@ class Pipeline:
         max_epochs = self.train_config['epochs']
         eval_frequency = self.train_config.get('evaluation_frequency', 10)
         save_frequency = self.train_config.get('save_frequency', 20)
+        early_stopping = self.train_config['early stopping']['enabled']
+        patience = self.train_config['early stopping'].get('patience', 10)
+        delta = self.train_config['early stopping'].get('delta', 0.0)
         
         self.logger.info(f"Starting training for {max_epochs} epochs")
         
@@ -72,10 +77,27 @@ class Pipeline:
             if epoch % 10 == 0:  # Log gradients every 10 epochs
                 self.log_model_gradients(epoch)
 
+
             # Evaluation
             if epoch % eval_frequency == 0:
 
                 valid_scores, test_scores = self.test(test=False)
+
+                if early_stopping:
+                    # Check for improvement
+                    if len(self.training_history['eval_metrics']) > 0:
+                        best_val_mrr = max([record['val_mrr'] for record in self.training_history['eval_metrics']])
+                        if valid_scores['mrr'] - best_val_mrr > delta:
+                            patience_counter = 0
+                        else:
+                            patience_counter += 1
+                            self.logger.info(f"No improvement in validation MRR for {patience_counter} evaluations.")
+                            if patience_counter >= patience:
+                                self.save_checkpoint(epoch)
+                                self.logger.info("Early stopping triggered.")
+                                break
+                    else:
+                        patience_counter = 0
 
                 if test_scores is None:
                     test_scores = {"mrr": 0, "mean_rank": 0, "hits@1": 0, "hits@3": 0, "hits@10": 0}
@@ -120,6 +142,12 @@ class Pipeline:
         self.logger.info("Training completed!")
         return self.training_history
 
+    def load_pipeline(self, checkpoint_path):
+        self.load_checkpoint(checkpoint_path)
+        self.logger.info("Pipeline loaded from checkpoint.")
+        test_scores = self.test_uncertainty()
+        self.logger.info(f"Uncertainty Evaluation - Brier Score: {test_scores['brier_score']:.4f}")
+        self.logger.info(f"Uncertainty Evaluation - Reliability Curve: {test_scores['reliability_curve']:.4f}")
 
 
     def train(self):
@@ -132,9 +160,11 @@ class Pipeline:
 
         # dropout some edge randomly for training
         if self.train_config['sampling']['edge_dropout'] > 0:
-            self.data.edge_index, self.data.edge_type = dropout_edges(self.data.edge_index, self.data.edge_type, self.train_config['sampling']['edge_dropout'])
+            edge_index, edge_type = dropout_edges(self.data.edge_index, self.data.edge_type, self.train_config['sampling']['edge_dropout'])
+        else:
+            edge_index, edge_type = self.data.edge_index, self.data.edge_type
 
-        z = self.model.encode(self.data.edge_index, self.data.edge_type)
+        z = self.model.encode(edge_index, edge_type)
 
         pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
 
@@ -187,6 +217,25 @@ class Pipeline:
             return valid_scores, test_scores
 
         return valid_scores, None
+
+    @torch.no_grad()
+    def test_uncertainty(self):
+
+        self.model.eval()
+
+        z = self.model.encode(self.data.edge_index, self.data.edge_type)
+        pos_out = self.model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
+        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes)
+        neg_out = self.model.decode(z, neg_edge_index, self.data.valid_edge_type)
+
+        out = torch.cat([pos_out, neg_out])
+        out = torch.sigmoid(out)
+        gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
+        valid_scores = compute_uncertainty(gt, out)
+
+        return valid_scores
+
+  
 
     def log_model_gradients(self, epoch):
         """Log gradient norms to TensorBoard for monitoring."""
@@ -255,7 +304,6 @@ class Pipeline:
         self.epoch = checkpoint['epoch']
         
         self.logger.info(f"Checkpoint loaded from {checkpoint_path}")
-    
     def __del__(self):
         """Cleanup TensorBoard writer when pipeline is destroyed."""
         if hasattr(self, 'writer'):

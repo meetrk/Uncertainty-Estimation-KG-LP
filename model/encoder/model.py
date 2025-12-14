@@ -31,7 +31,7 @@ class RGCN(nn.Module):
         self.w_init = model_config['encoder'].get('w_init', None)
         self.w_gain = model_config['encoder'].get('w_gain', False)
         self.b_init = model_config['encoder'].get('b_init', False)
-
+        self.mc_dropout = False
         
         # Entity embeddings (encoder)
         self.entity_embedding = nn.Parameter(torch.FloatTensor(num_nodes, self.embedding_dim))
@@ -39,9 +39,9 @@ class RGCN(nn.Module):
         
         # RGCN layers
         # self.conv1 = RGCNLayer(
-        #     self.embedding_dim, self.hidden_layer_size, self.num_relations * 2 + 1, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
+        #     self.embedding_dim, self.hidden_layer_size, self.num_relations, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
         # self.conv2 = RGCNLayer(
-        #     self.hidden_layer_size, self.embedding_dim, self.num_relations * 2 + 1, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
+        #     self.hidden_layer_size, self.embedding_dim, self.num_relations, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
         self.conv1 = RGCNConv(self.embedding_dim, self.hidden_layer_size, self.num_relations,
                               num_blocks=5)
         self.conv2 = RGCNConv(self.hidden_layer_size, self.embedding_dim, self.num_relations,
