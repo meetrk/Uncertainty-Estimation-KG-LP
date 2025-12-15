@@ -122,11 +122,13 @@ def compute_uncertainty(y_true, y_probs):
     from sklearn.calibration import calibration_curve
     from sklearn.metrics import brier_score_loss
 
+    y_true = y_true.cpu().detach()
+    y_probs = y_probs.cpu().detach()
     # 1. Brier Score
-    score = brier_score_loss(y_true, y_probs)
+    score = brier_score_loss(y_true.numpy(), y_probs.numpy())
 
     # 2. Reliability Diagram Data
-    prob_true, prob_pred = calibration_curve(y_true, y_probs, n_bins=10)
+    prob_true, prob_pred = calibration_curve(y_true.numpy(), y_probs.numpy(), n_bins=10, strategy='quantile')
 
     return {
         'brier_score': score,

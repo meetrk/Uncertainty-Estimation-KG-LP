@@ -125,12 +125,11 @@ def main():
         config=config_loader,
         logger=logger
     )
+
     train_config = config_loader.get_section('training')
     if train_config['test_uncertainty']:
         logger.info("Starting uncertainty evaluation on test set...")
         test_scores = pipeline.load_pipeline(train_config['checkpoint_path'])
-        logger.info(f"Uncertainty Evaluation - Brier Score: {test_scores['brier_score']:.4f}")
-        logger.info(f"Uncertainty Evaluation - Reliability Curve: {test_scores['reliability_curve']:.4f}")
         return
     # Start training
     logger.info("Starting training process...")

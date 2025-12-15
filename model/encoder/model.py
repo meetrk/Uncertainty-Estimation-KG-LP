@@ -53,7 +53,8 @@ class RGCN(nn.Module):
     def forward(self, edge_index, edge_type):
         x = self.entity_embedding + self.entity_embedding_bias
         x = self.conv1(x, edge_index, edge_type).relu_()
-        x = F.dropout(x, p=self.dropout_ratio, training=self.training)
+        dropout = self.training or self.mc_dropout
+        x = F.dropout(x, p=self.dropout_ratio, training=dropout)
         x = self.conv2(x, edge_index, edge_type)
         return x
     
