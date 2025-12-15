@@ -51,13 +51,13 @@ class Pipeline:
     def start_pipeline(self):
         max_epochs = self.train_config['epochs']
         eval_frequency = self.train_config.get('evaluation_frequency', 10)
-        save_frequency = self.train_config.get('save_frequency', 20)
         early_stopping = self.train_config['early stopping']['enabled']
         patience = self.train_config['early stopping'].get('patience', 10)
         delta = self.train_config['early stopping'].get('delta', 0.0)
         
         self.logger.info(f"Starting training for {max_epochs} epochs")
-        
+        best_val_mrr = -float('inf') 
+        patience_counter = 0
         tqdm_range = range(1, max_epochs + 1)
         tqdm_range = tqdm(tqdm_range, desc="Training", unit="batch")        
 
@@ -83,24 +83,27 @@ class Pipeline:
 
                 valid_scores, test_scores = self.test(test=False)
 
-                if early_stopping:
-                    # Check for improvement
-                    if len(self.training_history['eval_metrics']) > 0:
-                        best_val_mrr = max([record['val_mrr'] for record in self.training_history['eval_metrics']])
-                        if valid_scores['mrr'] - best_val_mrr > delta:
-                            patience_counter = 0
-                        else:
-                            patience_counter += 1
-                            self.logger.info(f"No improvement in validation MRR for {patience_counter} evaluations.")
-                            if patience_counter >= patience:
-                                self.save_checkpoint(epoch)
-                                self.logger.info("Early stopping triggered.")
-                                break
-                    else:
-                        patience_counter = 0
+                current_val_mrr = valid_scores['mrr']
+            
+                # Check if current model is better than the best found so far
+                if current_val_mrr - best_val_mrr > delta:
+                    best_val_mrr = current_val_mrr
+                    patience_counter = 0
+                    
+                    self.logger.info(f"New best model found! MRR: {best_val_mrr:.4f} > Previous: {best_val_mrr:.4f}")
+                    self.save_checkpoint(epoch) 
+                else:
+                    patience_counter += 1
+                    self.logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
+
+                # Early Stopping Trigger
+                if early_stopping and patience_counter >= patience:
+                    self.logger.info("Early stopping triggered.")
+                    break
 
                 if test_scores is None:
                     test_scores = {"mrr": 0, "mean_rank": 0, "hits@1": 0, "hits@3": 0, "hits@10": 0}
+
 
                 self.training_history['eval_metrics'].append({
                     "epoch": epoch,
@@ -133,9 +136,6 @@ class Pipeline:
                 self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
                 self.writer.add_scalar('Hits@10/Test', test_scores['hits@10'], epoch)
 
-            # Save checkpoint
-            if epoch % save_frequency == 0:
-                self.save_checkpoint(epoch)
         
         # Close TensorBoard writer
         self.writer.close()
@@ -245,10 +245,10 @@ class Pipeline:
     def test(self, test = True):
 
         self.model.eval()
-        z_mc_mean = self.inference_mc(mc_samples=10)
-        valid_scores = compute_mrr(z_mc_mean, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
+        z = self.model.encode(self.data.edge_index, self.data.edge_type)
+        valid_scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
         if test:
-            test_scores = compute_mrr(z_mc_mean, self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
+            test_scores = compute_mrr(z, self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
             return valid_scores, test_scores
 
         return valid_scores, None
@@ -334,8 +334,8 @@ class Pipeline:
         
         checkpoint_dir = Path('checkpoints')
         checkpoint_dir.mkdir(exist_ok=True)
-        
-        checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch}.pth'
+
+        checkpoint_path = checkpoint_dir / f'{self.config.get_section("dataset")["name"]}_checkpoint_epoch_{epoch}.pth'
         torch.save(checkpoint, checkpoint_path)
         
         self.logger.info(f"Checkpoint saved to {checkpoint_path}")

@@ -39,5 +39,5 @@ training:
     enabled: true
     patience: 10
     delta: 0.001
-  test_uncertainty: false
-  checkpoint_path: ./checkpoints/checkpoint_epoch_5800.pth
+  test_uncertainty: true
+  checkpoint_path: ./checkpoints/WN18RR_checkpoint_epoch_1700.pth

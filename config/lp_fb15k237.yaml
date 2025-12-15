@@ -24,15 +24,21 @@ model:
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 3
-    edge_dropout: 0
+    negative_sampling_ratio: 1
+    edge_dropout: 0.1
   optimiser:
     learning_rate: 0.01
     weight_decay: 0.0001
-  evaluation_frequency: 1000
+  evaluation_frequency: 500
   save_frequency: 1000
   evaluation:
     batch_size: 512
     verbose: true
     filter_candidates: true
     hits_at_k: 10
+  early stopping:
+    enabled: true
+    patience: 10
+    delta: 0.001
+  test_uncertainty: true
+  checkpoint_path: ./checkpoints/FB15k-237_checkpoint_epoch_1500.pth
