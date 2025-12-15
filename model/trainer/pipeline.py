@@ -7,7 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 from datetime import datetime
 # from utils.utils import negative_sampling
-from torch_geometric.utils import negative_sampling
+from utils.utils import negative_sampling
 from utils.evaluation import compute_mrr,compute_uncertainty
 from utils.utils import dropout_edges
 
@@ -143,11 +143,46 @@ class Pipeline:
         return self.training_history
 
     def load_pipeline(self, checkpoint_path):
+
         self.load_checkpoint(checkpoint_path)
         self.logger.info("Pipeline loaded from checkpoint.")
         test_scores = self.test_uncertainty()
+        test_mc_scores = self.test_uncertainty_mc(mc_samples=10)
+
         self.logger.info(f"Uncertainty Evaluation - Brier Score: {test_scores['brier_score']:.4f}")
-        self.logger.info(f"Uncertainty Evaluation - Reliability Curve: {test_scores['reliability_curve']:.4f}")
+        self.logger.info(f"Uncertainty Evaluation - Reliability Curve: {test_scores['reliability_curve']}")
+
+        self.logger.info(f"MC Dropout Uncertainty Evaluation - Brier Score: {test_mc_scores['brier_score']:.4f}")
+        self.logger.info(f"MC Dropout Uncertainty Evaluation - Reliability Curve: {test_mc_scores['reliability_curve']}")
+        return test_scores,test_mc_scores
+
+    @torch.no_grad()
+    def inference_mc(self, mc_samples=10):
+
+        self.model.eval()
+        self.model.encoder.mc_dropout = True  
+        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
+
+        preds_list = []
+
+        for _ in range(mc_samples):
+            z = self.model.encode(self.data.edge_index, self.data.edge_type)
+            pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
+            pos_out = torch.sigmoid(pos_out)
+            neg_out = self.model.decode(z, neg_edge_index, self.data.train_edge_type)
+            neg_out = torch.sigmoid(neg_out)
+            self.logger.info(f"MC Sample {_+1}: Pos Out Mean: {pos_out.mean():.4f}, Neg Out Mean: {neg_out.mean():.4f}")
+            self.logger.info(f"MC Sample {_+1}: Pos Out Std: {pos_out.std():.4f}, Neg Out Std: {neg_out.std():.4f}")
+            out = torch.cat([pos_out, neg_out])
+            preds_list.append(out)
+
+        self.model.encoder.mc_dropout = False
+        labels = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
+        preds_stack = torch.stack(preds_list)
+        preds_mean = preds_stack.mean(dim=0)
+        preds_std = preds_stack.std(dim=0)
+
+        return preds_mean, preds_std, labels
 
 
     def train(self):
@@ -210,10 +245,10 @@ class Pipeline:
     def test(self, test = True):
 
         self.model.eval()
-        z = self.model.encode(self.data.edge_index, self.data.edge_type)
-        valid_scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
+        z_mc_mean = self.inference_mc(mc_samples=10)
+        valid_scores = compute_mrr(z_mc_mean, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
         if test:
-            test_scores = compute_mrr(z, self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
+            test_scores = compute_mrr(z_mc_mean, self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
             return valid_scores, test_scores
 
         return valid_scores, None
@@ -222,20 +257,31 @@ class Pipeline:
     def test_uncertainty(self):
 
         self.model.eval()
-
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
         pos_out = self.model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
+        pos_out = torch.sigmoid(pos_out)
+        print(torch.mean(pos_out))
         neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes)
         neg_out = self.model.decode(z, neg_edge_index, self.data.valid_edge_type)
-
+        neg_out = torch.sigmoid(neg_out)
+        print(torch.mean(neg_out))
         out = torch.cat([pos_out, neg_out])
-        out = torch.sigmoid(out)
         gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
         valid_scores = compute_uncertainty(gt, out)
 
         return valid_scores
 
-  
+    @torch.no_grad()
+    def test_uncertainty_mc(self, mc_samples=10):
+
+        self.model.eval()
+        mean_pred, var_pred, labels = self.inference_mc(mc_samples=mc_samples)
+        # self.logger.info(f"Mean Prediction Stats - Mean: {mean_pred.mean():.4f}, Std: {mean_pred.std():.4f}")
+        val_scores = compute_uncertainty(labels, mean_pred)
+
+        return val_scores
+
+
 
     def log_model_gradients(self, epoch):
         """Log gradient norms to TensorBoard for monitoring."""
@@ -296,7 +342,7 @@ class Pipeline:
     
     def load_checkpoint(self, checkpoint_path):
         """Load model checkpoint."""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

@@ -22,9 +22,9 @@ model:
     b_init: false
   
 training:
-  epochs: 500
+  epochs: 10000
   sampling:
-    negative_sampling_ratio: 5
+    negative_sampling_ratio: 1
     edge_dropout: 0.1
   optimiser:
     learning_rate: 0.01
@@ -35,3 +35,9 @@ training:
     batch_size: 512
     filter_candidates: true
     hits_at_k: 30
+  early stopping:
+    enabled: true
+    patience: 10
+    delta: 0.001
+  test_uncertainty: false
+  checkpoint_path: ./checkpoints/checkpoint_epoch_5800.pth

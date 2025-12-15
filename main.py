@@ -126,6 +126,11 @@ def main():
         logger=logger
     )
 
+    train_config = config_loader.get_section('training')
+    if train_config['test_uncertainty']:
+        logger.info("Starting uncertainty evaluation on test set...")
+        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'])
+        return
     # Start training
     logger.info("Starting training process...")
     training_results = pipeline.start_pipeline()
