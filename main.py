@@ -8,7 +8,6 @@ from model.decoder.distmult import DistMult
 from model.decoder.transe import TransE
 from model.trainer.pipeline import Pipeline
 import os.path as osp
-from torch_geometric.datasets.word_net import WordNet18RR
 from misc.rel_link_pred_dataset import RelLinkPredDataset
 import torch
 from torch_geometric.nn import GAE
@@ -86,6 +85,7 @@ def main():
         raise ValueError("Unsupported dataset specified")
     logger.info(f"Dataset '{dataset_config['name']}' loaded successfully.")
     logger.info(f"Number of nodes: {data}")
+    
     # Initialize decoder
     if config_loader.get_section('model')['decoder']['type'] == 'DistMult':
         decoder = DistMult
@@ -110,11 +110,6 @@ def main():
     logger.info("Encoder initialized successfully.")
     logger.info(f"Encoder parameters count: {sum(p.numel() for p in encoder.parameters())}")
 
-    logger.info("Total encoder parameters: {}".format(sum(p.numel() for p in encoder.parameters())))
-
-    logger.info(f"Encoder architecture:\n{encoder}")
-
-    logger.info(f"Decoder architecture:\n{decoder}")
 
     model = GAE(encoder=encoder, decoder=decoder).to(device)
     logger.info(f"GAE architecture:\n{model}")
@@ -129,7 +124,7 @@ def main():
     train_config = config_loader.get_section('training')
     if train_config['test_uncertainty']:
         logger.info("Starting uncertainty evaluation on test set...")
-        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'])
+        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'],50)
         return
     # Start training
     logger.info("Starting training process...")

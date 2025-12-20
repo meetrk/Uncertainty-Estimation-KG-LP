@@ -16,7 +16,6 @@ model:
 
   decoder:
     type: DistMult
-    l2_penalty_type: schlichtkrull-l2
     l2_penalty : 0.001
     w_gain: false
     b_init: false

@@ -142,37 +142,48 @@ class Pipeline:
         self.logger.info("Training completed!")
         return self.training_history
 
-    def load_pipeline(self, checkpoint_path):
+    def load_pipeline(self, checkpoint_path, uncertainty_samples=10):
 
         self.load_checkpoint(checkpoint_path)
         self.logger.info("Pipeline loaded from checkpoint.")
-        test_scores = self.test_uncertainty()
-        test_mc_scores = self.test_uncertainty_mc(mc_samples=10)
+        uncertainty_scores = []
+        for i in range(1, uncertainty_samples + 1):
+            mc_samples = i
+    
+            # Run the new robust function
+            test_mc_scores = self.test_uncertainty(mc_samples=mc_samples)
 
-        self.logger.info(f"Uncertainty Evaluation - Brier Score: {test_scores['brier_score']:.4f}")
-        self.logger.info(f"Uncertainty Evaluation - Reliability Curve: {test_scores['reliability_curve']}")
+            self.logger.info(f"MC Dropout Uncertainty Evaluation - Brier Score: {test_mc_scores['brier_score']:.4f}")
+            self.logger.info(f"MC Dropout Uncertainty Evaluation - ECE: {test_mc_scores['ece']:.4f}")
+            self.logger.info(f"Probability True: {(test_mc_scores['prob_true'])}")
+            self.logger.info(f"Probability Predicted: {(test_mc_scores['prob_pred'])}")
+            
+            self.writer.add_scalar("MC_Uncertainty/Brier_Score", test_mc_scores['brier_score'], mc_samples)
+            self.writer.add_scalar("MC_Uncertainty/ECE", test_mc_scores['ece'], mc_samples)
+            
 
-        self.logger.info(f"MC Dropout Uncertainty Evaluation - Brier Score: {test_mc_scores['brier_score']:.4f}")
-        self.logger.info(f"MC Dropout Uncertainty Evaluation - Reliability Curve: {test_mc_scores['reliability_curve']}")
-        return test_scores,test_mc_scores
+            self.logger.info(f"Step {mc_samples} - Brier: {test_mc_scores['brier_score']:.4f}, ECE: {test_mc_scores['ece']:.4f}")
+
+        return uncertainty_scores
 
     @torch.no_grad()
     def inference_mc(self, mc_samples=10):
 
         self.model.eval()
-        self.model.encoder.mc_dropout = True  
-        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
+        if mc_samples > 1:
+            self.model.encoder.mc_dropout = True  
 
+        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes)
+        print("Inference MC Samples:", mc_samples, self.model.encoder.mc_dropout)
         preds_list = []
 
         for _ in range(mc_samples):
             z = self.model.encode(self.data.edge_index, self.data.edge_type)
-            pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
+            pos_out = self.model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
             pos_out = torch.sigmoid(pos_out)
-            neg_out = self.model.decode(z, neg_edge_index, self.data.train_edge_type)
+            neg_out = self.model.decode(z, neg_edge_index, self.data.valid_edge_type)
             neg_out = torch.sigmoid(neg_out)
-            self.logger.info(f"MC Sample {_+1}: Pos Out Mean: {pos_out.mean():.4f}, Neg Out Mean: {neg_out.mean():.4f}")
-            self.logger.info(f"MC Sample {_+1}: Pos Out Std: {pos_out.std():.4f}, Neg Out Std: {neg_out.std():.4f}")
+
             out = torch.cat([pos_out, neg_out])
             preds_list.append(out)
 
@@ -180,9 +191,9 @@ class Pipeline:
         labels = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
         preds_stack = torch.stack(preds_list)
         preds_mean = preds_stack.mean(dim=0)
-        preds_std = preds_stack.std(dim=0)
+        preds_var = preds_stack.var(dim=0)
 
-        return preds_mean, preds_std, labels
+        return preds_mean, preds_var, labels
 
 
     def train(self):
@@ -208,9 +219,11 @@ class Pipeline:
 
         out = torch.cat([pos_out, neg_out])
         gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
+        
         cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
         reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
-        loss = cross_entropy_loss + 1e-2 * reg_loss
+
+        loss = cross_entropy_loss + self.model_config['decoder']['l2_penalty'] * reg_loss
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.)
@@ -254,33 +267,16 @@ class Pipeline:
         return valid_scores, None
 
     @torch.no_grad()
-    def test_uncertainty(self):
-
-        self.model.eval()
-        z = self.model.encode(self.data.edge_index, self.data.edge_type)
-        pos_out = self.model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
-        pos_out = torch.sigmoid(pos_out)
-        print(torch.mean(pos_out))
-        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes)
-        neg_out = self.model.decode(z, neg_edge_index, self.data.valid_edge_type)
-        neg_out = torch.sigmoid(neg_out)
-        print(torch.mean(neg_out))
-        out = torch.cat([pos_out, neg_out])
-        gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
-        valid_scores = compute_uncertainty(gt, out)
-
-        return valid_scores
-
-    @torch.no_grad()
-    def test_uncertainty_mc(self, mc_samples=10):
+    def test_uncertainty(self, mc_samples=10):
 
         self.model.eval()
         mean_pred, var_pred, labels = self.inference_mc(mc_samples=mc_samples)
-        # self.logger.info(f"Mean Prediction Stats - Mean: {mean_pred.mean():.4f}, Std: {mean_pred.std():.4f}")
+
+        self.writer.add_scalar("MC_Uncertainty/Mean_Pred_Std", var_pred.mean(), mc_samples)
+        
         val_scores = compute_uncertainty(labels, mean_pred)
 
         return val_scores
-
 
 
     def log_model_gradients(self, epoch):
@@ -302,7 +298,6 @@ class Pipeline:
             'learning_rate': self.learning_rate,
             'weight_decay': self.weight_decay,
             'epochs': self.train_config['epochs'],
-            # 'batch_size': self.train_config['sampling']['batch_size'],
             'negative_sampling_ratio': self.train_config['sampling']['negative_sampling_ratio'],
             'embedding_dim': self.model_config['encoder']['embedding_dim'],
             'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
@@ -350,6 +345,7 @@ class Pipeline:
         self.epoch = checkpoint['epoch']
         
         self.logger.info(f"Checkpoint loaded from {checkpoint_path}")
+        
     def __del__(self):
         """Cleanup TensorBoard writer when pipeline is destroyed."""
         if hasattr(self, 'writer'):
