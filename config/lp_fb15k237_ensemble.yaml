@@ -1,0 +1,47 @@
+dataset:
+  name: FB15k-237
+  path: ./dataset/fb15k237
+
+model:
+  encoder:
+    type: RGCN
+    hidden_layer_size: 500
+    embedding_dim: 500
+    num_layers: 2
+    dropout: 0.1
+    num_bases : 4
+    w_init: schlichtkrull-normal
+    w_gain: false
+    b_init: zeros
+
+  decoder:
+    type: DistMult
+    l2_penalty : 0.01
+    w_gain: false
+    b_init: false
+  
+ensemble:
+  enabled: true
+  num_models: 5  
+
+training:
+  epochs: 10000
+  sampling:
+    negative_sampling_ratio: 1
+    edge_dropout: 0.1
+  optimiser:
+    learning_rate: 0.01
+    weight_decay: 0.0001
+  evaluation_frequency: 500
+  save_frequency: 1000
+  evaluation:
+    batch_size: 512
+    verbose: true
+    filter_candidates: true
+    hits_at_k: 10
+  early stopping:
+    enabled: true
+    patience: 10
+    delta: 0.001
+  test_uncertainty: true
+  checkpoint_path: ./checkpoints/FB15k-237_ensemble_checkpoint_epoch_3000.pth

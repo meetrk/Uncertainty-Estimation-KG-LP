@@ -1,0 +1,47 @@
+dataset:
+  name: WN18RR
+  path: ./dataset/wn18rr
+
+model:
+  encoder:
+    type: RGCN
+    hidden_layer_size: 500
+    embedding_dim: 500
+    num_layers: 2
+    dropout: 0.2
+    num_bases: 5
+    w_init: schlichtkrull-normal
+    w_gain: false
+    b_init: zeros
+
+  decoder:
+    type: DistMult
+    l2_penalty: 0.001
+    w_gain: false
+    b_init: false
+
+# Deep Ensemble Configuration
+ensemble:
+  enabled: true
+  num_models: 5  # Number of ensemble members
+  
+training:
+  epochs: 10000
+  sampling:
+    negative_sampling_ratio: 1
+    edge_dropout: 0.1
+  optimiser:
+    learning_rate: 0.01
+    weight_decay: 0.0001
+  evaluation_frequency: 100
+  save_frequency: 50
+  evaluation:
+    batch_size: 512
+    filter_candidates: true
+    hits_at_k: 30
+  early stopping:
+    enabled: true
+    patience: 10
+    delta: 0.001
+  test_uncertainty: true
+  checkpoint_path: ./checkpoints/WN18RR_ensemble_checkpoint_epoch_1800.pth
