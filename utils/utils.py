@@ -184,7 +184,41 @@ def generate_batch_triples(triples, num_nodes, config, mode, sampling="sample"):
     
     return batch
 
-def negative_sampling(edge_index, num_nodes):
+
+def negative_sampling_1(edge_index, edge_type, num_nodes, n_neg=1):
+    """
+    Generates n_neg negative samples for each positive edge, preserving edge types.
+    
+    Args:
+        edge_index: (2, E)
+        edge_type: (E, )
+        num_nodes: int
+        n_neg: int
+    """
+    
+    # 1. Repeat the edges (2, E * n)
+    # Pattern: [Batch, Batch, ...]
+    neg_edge_index = edge_index.repeat(1, n_neg)
+    
+    # 2. Repeat the types (E * n, ) to match the edges
+    # Pattern: [Batch, Batch, ...]
+    neg_edge_type = edge_type.repeat(n_neg)
+    
+    # 3. Standard corruption logic (same as before)
+    total_neg_samples = neg_edge_index.size(1)
+    
+    mask_1 = torch.rand(total_neg_samples) < 0.5
+    mask_2 = ~mask_1
+
+    rnd_nodes = torch.randint(num_nodes, (total_neg_samples, ), 
+                              device=neg_edge_index.device)
+
+    neg_edge_index[0, mask_1] = rnd_nodes[mask_1]
+    neg_edge_index[1, mask_2] = rnd_nodes[mask_2]
+    
+    return neg_edge_index, neg_edge_type
+
+def negative_sampling(edge_index,edge_type,num_nodes,n_neg=1):
     # Sample edges by corrupting either the subject or the object of each edge.
     mask_1 = torch.rand(edge_index.size(1)) < 0.5
     mask_2 = ~mask_1
@@ -194,24 +228,19 @@ def negative_sampling(edge_index, num_nodes):
                                               device=neg_edge_index.device)
     neg_edge_index[1, mask_2] = torch.randint(num_nodes, (mask_2.sum(), ),
                                               device=neg_edge_index.device)
-    return neg_edge_index
-
-import torch
+    
+    return neg_edge_index,edge_type
 
 def dropout_edges(edge_index, edge_type, dropout_ratio):
-    num_edges = edge_index.size(1)
     
-    # 1. Determine the number of real edges (assuming exactly half are real, half are inverse)
+    num_edges = edge_index.size(1)
+
     num_real_edges = num_edges // 2
     
-    # 2. Generate a mask ONLY for the real edges
     mask_real = torch.rand(num_real_edges, device=edge_index.device) >= dropout_ratio
-    
-    # 3. Concatenate the mask with itself
-    # This ensures that if index `i` (real) is kept, index `i + num_real` (inverse) is also kept.
+  
     mask = torch.cat([mask_real, mask_real], dim=0)
     
-    # 4. Apply the synchronized mask
     dropped_edge_index = edge_index[:, mask]
     dropped_edge_type = edge_type[mask]
     

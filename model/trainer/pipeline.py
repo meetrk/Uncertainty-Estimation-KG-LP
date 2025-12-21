@@ -6,9 +6,8 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 from datetime import datetime
-# from utils.utils import negative_sampling
 from utils.utils import negative_sampling
-from utils.evaluation import compute_mrr,compute_uncertainty
+from utils.evaluation import compute_mrr,compute_uncertainty,compute_mrr_mc_dropout
 from utils.utils import dropout_edges
 
 class Pipeline:
@@ -28,7 +27,7 @@ class Pipeline:
         self.optimizer = torch.optim.Adam(
             model.parameters(), 
             lr=self.learning_rate, 
-            # weight_decay=self.weight_decay
+            weight_decay=self.weight_decay
         )
         self.all_triples = torch.stack([
                     self.data.edge_index[0],
@@ -142,46 +141,31 @@ class Pipeline:
         self.logger.info("Training completed!")
         return self.training_history
 
-    def load_pipeline(self, checkpoint_path, uncertainty_samples=10):
+    def load_pipeline(self, checkpoint_path, uncertainty_samples=5):
 
         self.load_checkpoint(checkpoint_path)
         self.logger.info("Pipeline loaded from checkpoint.")
-        uncertainty_scores = []
-        for i in range(1, uncertainty_samples + 1):
-            mc_samples = i
-    
-            # Run the new robust function
-            test_mc_scores = self.test_uncertainty(mc_samples=mc_samples)
 
-            self.logger.info(f"MC Dropout Uncertainty Evaluation - Brier Score: {test_mc_scores['brier_score']:.4f}")
-            self.logger.info(f"MC Dropout Uncertainty Evaluation - ECE: {test_mc_scores['ece']:.4f}")
-            self.logger.info(f"Probability True: {(test_mc_scores['prob_true'])}")
-            self.logger.info(f"Probability Predicted: {(test_mc_scores['prob_pred'])}")
-            
-            self.writer.add_scalar("MC_Uncertainty/Brier_Score", test_mc_scores['brier_score'], mc_samples)
-            self.writer.add_scalar("MC_Uncertainty/ECE", test_mc_scores['ece'], mc_samples)
-            
+        scores = self.test_link_pred(mc_samples=uncertainty_samples)
 
-            self.logger.info(f"Step {mc_samples} - Brier: {test_mc_scores['brier_score']:.4f}, ECE: {test_mc_scores['ece']:.4f}")
-
-        return uncertainty_scores
+        return scores
 
     @torch.no_grad()
-    def inference_mc(self, mc_samples=10):
+    def inference_mc(self, edge_index, edge_type, mc_samples=10):
 
         self.model.eval()
         if mc_samples > 1:
             self.model.encoder.mc_dropout = True  
 
-        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes)
+        neg_edge_index,neg_edge_type = negative_sampling(edge_index, edge_type, self.data.num_nodes,1)
         print("Inference MC Samples:", mc_samples, self.model.encoder.mc_dropout)
         preds_list = []
 
         for _ in range(mc_samples):
             z = self.model.encode(self.data.edge_index, self.data.edge_type)
-            pos_out = self.model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
+            pos_out = self.model.decode(z, edge_index, edge_type)
             pos_out = torch.sigmoid(pos_out)
-            neg_out = self.model.decode(z, neg_edge_index, self.data.valid_edge_type)
+            neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
             neg_out = torch.sigmoid(neg_out)
 
             out = torch.cat([pos_out, neg_out])
@@ -193,8 +177,31 @@ class Pipeline:
         preds_mean = preds_stack.mean(dim=0)
         preds_var = preds_stack.var(dim=0)
 
-        return preds_mean, preds_var, labels
+        means = {
+            'preds_mean': preds_mean,
+            'preds_var': preds_var,
+            'labels': labels    
+        }
 
+        return means
+
+
+    @torch.no_grad()
+    def test_link_pred(self, mc_samples=10):
+
+        self.model.eval()
+        scores = compute_mrr_mc_dropout(self.data.train_edge_index, self.data.train_edge_type,
+                               self.data.valid_edge_index, self.data.valid_edge_type,
+                               self.data, self.model, mc_samples=mc_samples)
+        
+
+        self.logger.info(f"MRR = {scores['mrr']:.4f}")
+        self.logger.info(f"Mean Rank = {scores['mean_rank']:.4f}")
+        self.logger.info(f"Hits@1 = {scores['hits@1']:.4f}")
+        self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
+        self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
+        
+        return scores
 
     def train(self):
         """
@@ -214,8 +221,8 @@ class Pipeline:
 
         pos_out = self.model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
 
-        neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
-        neg_out = self.model.decode(z, neg_edge_index, self.data.train_edge_type)
+        neg_edge_index,neg_edge_type = negative_sampling(self.data.train_edge_index, self.data.train_edge_type, self.data.num_nodes, self.train_config['sampling']['negative_sampling_ratio'])
+        neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
 
         out = torch.cat([pos_out, neg_out])
         gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
@@ -243,7 +250,7 @@ class Pipeline:
 
         pos_out = self.model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
 
-        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes)
+        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes,10)
         neg_out = self.model.decode(z, neg_edge_index, self.data.valid_edge_type)
 
         out = torch.cat([pos_out, neg_out])
@@ -270,11 +277,14 @@ class Pipeline:
     def test_uncertainty(self, mc_samples=10):
 
         self.model.eval()
-        mean_pred, var_pred, labels = self.inference_mc(mc_samples=mc_samples)
+        scores = self.inference_mc(self.data.valid_edge_index, self.data.valid_edge_type, mc_samples=mc_samples)
 
-        self.writer.add_scalar("MC_Uncertainty/Mean_Pred_Std", var_pred.mean(), mc_samples)
+        self.writer.add_scalar("MC_Uncertainty/Mean_Pred_Std", scores['preds_var'].mean(), mc_samples)
         
-        val_scores = compute_uncertainty(labels, mean_pred)
+        val_scores = compute_uncertainty(scores['labels'], scores['preds_mean'])
+
+        print("Overall Uncertainty Scores:", val_scores)
+
 
         return val_scores
 
@@ -302,8 +312,6 @@ class Pipeline:
             'embedding_dim': self.model_config['encoder']['embedding_dim'],
             'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
             'num_bases': self.model_config['encoder']['num_bases'],
-            'b_init': self.model_config['decoder']['b_init'],
-            'w_gain': self.model_config['decoder']['w_gain'],
             # 'sampling_method': self.train_config['sampling']['method']
         }
         

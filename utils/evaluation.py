@@ -206,6 +206,89 @@ def compute_mrr_emsemble(train_edge_index, train_edge_type, edge_index, edge_typ
     return scores
 
 
+@torch.no_grad()
+def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_type, data, model, mc_samples=10):
+    """
+    Compute MRR for ensemble with optimized encoding caching.
+    
+    Key optimization: Encode the graph once per model, reuse for all triples.
+    This reduces complexity from O(N_models × N_triples × encoding_cost) 
+    to O(N_models × encoding_cost + N_models × N_triples × decoding_cost).
+    """
+    # OPTIMIZATION: Encode graph once per model and cache
+    all_z = []
+    model.encoder.mc_dropout = True
+    for _ in range(mc_samples):
+        z = model.encode(train_edge_index, train_edge_type)
+        all_z.append(z)
+    model.encoder.mc_dropout = False
+
+    ranks = []
+    for i in tqdm(range(edge_type.numel()), desc="Computing MRR"):
+        (src, dst), rel = edge_index[:, i], edge_type[i]
+
+        # Try all nodes as tails, but delete true triplets:
+        tail_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+        for (heads, tails), types in [
+            (data.train_edge_index, data.train_edge_type),
+            (data.valid_edge_index, data.valid_edge_type),
+            (data.test_edge_index, data.test_edge_type),
+        ]:
+            tail_mask[tails[(heads == src) & (types == rel)]] = False
+
+        tail = torch.arange(data.num_nodes)[tail_mask]
+        tail = torch.cat([torch.tensor([dst]), tail])
+        head = torch.full_like(tail, fill_value=src)
+        eval_edge_index = torch.stack([head, tail], dim=0)
+        eval_edge_type = torch.full_like(tail, fill_value=rel)
+
+        # Use cached encodings for prediction
+        predictions = []
+        for model_idx in range(mc_samples):
+            pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
+            pred = torch.sigmoid(pred)
+            predictions.append(pred)
+        
+        out = torch.mean(torch.stack(predictions, dim=0), dim=0)
+        rank = compute_rank(out)
+        ranks.append(rank)
+
+        # Try all nodes as heads, but delete true triplets:
+        head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+        for (heads, tails), types in [
+            (data.train_edge_index, data.train_edge_type),
+            (data.valid_edge_index, data.valid_edge_type),
+            (data.test_edge_index, data.test_edge_type),
+        ]:
+            head_mask[heads[(tails == dst) & (types == rel)]] = False
+
+        head = torch.arange(data.num_nodes)[head_mask]
+        head = torch.cat([torch.tensor([src]), head])
+        tail = torch.full_like(head, fill_value=dst)
+        eval_edge_index = torch.stack([head, tail], dim=0)
+        eval_edge_type = torch.full_like(head, fill_value=rel)
+
+        # Use cached encodings for prediction
+        predictions = []
+        for model_idx in range(mc_samples):
+            pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
+            pred = torch.sigmoid(pred)
+            predictions.append(pred)
+        
+        out = torch.mean(torch.stack(predictions, dim=0), dim=0)
+        rank = compute_rank(out)
+        ranks.append(rank)
+
+    scores = {
+        'mrr': (1. / torch.tensor(ranks, dtype=torch.float)).mean(),
+        'mean_rank': torch.tensor(ranks, dtype=torch.float).mean(),
+        'hits@1': (torch.tensor(ranks, dtype=torch.float) <= 1).float().mean(),
+        'hits@3': (torch.tensor(ranks, dtype=torch.float) <= 3).float().mean(),
+        'hits@10': (torch.tensor(ranks, dtype=torch.float) <= 10).float().mean(),
+    }
+
+    return scores
+
 def compute_uncertainty(y_true, y_probs):
     """
     Computes Brier Score, ECE (weighted), and generates a Reliability Diagram.

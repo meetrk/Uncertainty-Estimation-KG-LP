@@ -154,8 +154,8 @@ class EnsemblePipeline:
             pos_out = model.decode(z, self.data.train_edge_index, self.data.train_edge_type)
             
             # Negative sampling
-            neg_edge_index = negative_sampling(self.data.train_edge_index, self.data.num_nodes)
-            neg_out = model.decode(z, neg_edge_index, self.data.train_edge_type)
+            neg_edge_index, neg_edge_type = negative_sampling(self.data.train_edge_index,self.data.train_edge_type, self.data.num_nodes,1)
+            neg_out = model.decode(z, neg_edge_index, neg_edge_type)
             
             # Compute loss
             out = torch.cat([pos_out, neg_out])
@@ -175,7 +175,7 @@ class EnsemblePipeline:
         return ensemble_losses
     
     @torch.no_grad()
-    def test_ensemble(self, test=True):
+    def test_ensemble(self):
         """Test ensemble with uncertainty quantification."""
 
         self.ensemble.eval()
@@ -211,12 +211,12 @@ class EnsemblePipeline:
         )
         
         # Also get negative samples for evaluation
-        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes)
+        neg_edge_index, neg_edge_type = negative_sampling(self.data.valid_edge_index, self.data.valid_edge_type ,self.data.num_nodes, 1)
         neg_mean_pred, neg_std_pred = self.ensemble.predict_with_uncertainty(
             self.data.edge_index,
             self.data.edge_type,
             neg_edge_index,
-            self.data.valid_edge_type
+            neg_edge_type,
         )
         
         # Combine positive and negative predictions
@@ -246,7 +246,22 @@ class EnsemblePipeline:
         self.logger.info(f"Probability Predicted: {np.asarray(scores['prob_pred'])}")
         
         return scores
-    
+
+    def load_pipeline(self, checkpoint_path):
+        """Load ensemble pipeline from checkpoint."""
+        self.load_checkpoint(checkpoint_path)
+        self.logger.info("Checkpoint loaded. Evaluating ensemble uncertainty on test set...")
+
+        scores,_ = self.test_ensemble()
+
+        self.logger.info(f"MRR = {scores['mrr']:.4f}")
+        self.logger.info(f"Mean Rank = {scores['mean_rank']:.4f}")
+        self.logger.info(f"Hits@1 = {scores['hits@1']:.4f}")
+        self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
+        self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
+
+        return scores
+
     @torch.no_grad()
     def compute_diversity(self):
         """
