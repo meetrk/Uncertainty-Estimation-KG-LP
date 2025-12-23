@@ -228,8 +228,6 @@ class Pipeline:
     @torch.no_grad()
     def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type):
 
-        print("Temperature:", torch.sum(model.decoder.temperature).item())
-        print("MC dropout status:", model.encoder.mc_dropout)
         model.eval()
         z = model.encoder(edge_index, edge_type)
         pos_scores = model.decode(z, test_edge_index, test_edge_type)
@@ -380,119 +378,120 @@ class Pipeline:
         
         nll_loss = F.binary_cross_entropy_with_logits(logits, labels)
         
-        # Add L2 regularization on temperature to prevent extreme values
-        # Penalize deviation from 1.0 (no scaling)
-        temp_reg = lambda_reg * torch.mean((model.decoder.temperature - 1.0) ** 2)
+        # Optional: Add L2 regularization on temperature network weights
+        # This helps prevent extreme temperature values
+        if hasattr(model.decoder, 'temp_network') and lambda_reg > 0:
+            temp_reg = 0
+            for param in model.decoder.temp_network.parameters():
+                temp_reg += torch.sum(param ** 2)
+            temp_reg = lambda_reg * temp_reg
+            return nll_loss + temp_reg
         
-        return nll_loss + temp_reg
+        return nll_loss
 
 
     def calibrate_temperature(self, model, max_iters=50, lr=0.01):
         """
         Calibrate temperature parameter on validation set.
+        For input-dependent temperature, this calibrates the temperature prediction network.
         
         Args:
-            model: The GAE model with temperature parameter
-            data: Graph data
-            val_edge_index: Validation edge indices
-            val_edge_type: Validation edge types
+            model: The GAE model with temperature parameter/network
             max_iters: Maximum calibration iterations
             lr: Learning rate for temperature optimization
-            device: Device to run on
-            logger: Logger instance
             
         Returns:
-            Calibrated temperature statistics (dict with mean, std, min, max)
+            Calibrated temperature statistics
         """
-        # Freeze all parameters except temperature
+        # Freeze all parameters except temperature-related ones
         for name, param in model.named_parameters():
-            if 'temperature' not in name:
+            if 'temp_network' not in name and 'temperature' not in name:
                 param.requires_grad = False
             else:
                 param.requires_grad = True
-                # Handle both scalar and vector temperature
-                if param.dim() == 0 or param.numel() == 1:
-                    self.logger.info(f"Optimizing parameter: {name}, Initial value: {param.item():.4f}")
-                else:
-                    self.logger.info(f"Optimizing parameter: {name}, Shape: {param.shape}")
-                    self.logger.info(f"  Initial stats - Mean: {param.mean().item():.4f}, Std: {param.std().item():.4f}, Min: {param.min().item():.4f}, Max: {param.max().item():.4f}")
+                self.logger.info(f"Optimizing parameter: {name}, Shape: {param.shape}")
         
-        # Optimizer for temperature only
-        temp_params = [p for name, p in model.named_parameters() if 'temperature' in name]
-        optimizer = torch.optim.LBFGS(temp_params, lr=lr, max_iter=max_iters)
+        # Get temperature parameters
+        temp_params = [p for name, p in model.named_parameters() 
+                      if 'temp_network' in name or 'temperature' in name]
         
-        self.logger.info("Starting temperature calibration...")
+        if not temp_params:
+            self.logger.warning("No temperature parameters found for calibration!")
+            return {}
         
-        # Log initial temperature statistics
-        temp_tensor = model.decoder.temperature
-        if temp_tensor.dim() == 0 or temp_tensor.numel() == 1:
-            self.logger.info(f"Initial temperature: {temp_tensor.item():.4f}")
-        else:
-            self.logger.info(f"Initial temperature shape: {temp_tensor.shape}")
-            self.logger.info(f"Initial temperature stats - Mean: {temp_tensor.mean().item():.4f}, Std: {temp_tensor.std().item():.4f}, Min: {temp_tensor.min().item():.4f}, Max: {temp_tensor.max().item():.4f}")
+        # Use Adam optimizer for neural network (better than LBFGS for MLPs)
+        optimizer = torch.optim.Adam(temp_params, lr=lr)
         
+        self.logger.info("Starting input-dependent temperature calibration...")
+        self.logger.info(f"Calibrating {len(temp_params)} temperature network parameters")
         
-        def eval_closure():
+        best_loss = float('inf')
+        patience_counter = 0
+        patience = 5
+        
+        temperature_values = []
+        
+        # Optimize
+        for i in range(max_iters):
             optimizer.zero_grad()
             loss = self.compute_nll_loss(model)
             loss.backward()
+            
             # Clip gradients to prevent explosion
             torch.nn.utils.clip_grad_norm_(temp_params, max_norm=1.0)
-            return loss
-        
-        temperature_values = []
-        # Optimize
-        for i in range(max_iters):
-            loss = optimizer.step(eval_closure)
             
-            # Clamp temperature to reasonable bounds after each step
-            with torch.no_grad():
-                model.decoder.temperature.clamp_(min=0.01, max=10.0)
+            optimizer.step()
             
-            temp_tensor = model.decoder.temperature
-
-            # Store temperature statistics
-            if temp_tensor.dim() == 0 or temp_tensor.numel() == 1:
-                temp_stats = {
-                    'i': i + 1,
-                    'temperature': temp_tensor.item(),
-                    'nll_loss': loss.item()
-                }
+            # Log progress
+            loss_val = loss.item()
+            temperature_values.append({'iteration': i + 1, 'nll_loss': loss_val})
+            
+            if loss_val < best_loss:
+                best_loss = loss_val
+                patience_counter = 0
             else:
-                temp_stats = {
-                    'i': i + 1,
-                    'temp_mean': temp_tensor.mean().item(),
-                    'temp_std': temp_tensor.std().item(),
-                    'temp_min': temp_tensor.min().item(),
-                    'temp_max': temp_tensor.max().item(),
-                    'nll_loss': loss.item()
-                }
-            
-            temperature_values.append(temp_stats)
+                patience_counter += 1
             
             if (i + 1) % 10 == 0:
-                if temp_tensor.dim() == 0 or temp_tensor.numel() == 1:
-                    self.logger.info(f"Iteration {i+1}/{max_iters}: NLL Loss = {loss.item():.4f}, Temperature = {temp_tensor.item():.4f}")
-                else:
-                    self.logger.info(f"Iteration {i+1}/{max_iters}: NLL Loss = {loss.item():.4f}")
-                    self.logger.info(f"  Temperature stats - Mean: {temp_tensor.mean().item():.4f}, Std: {temp_tensor.std().item():.4f}, Min: {temp_tensor.min().item():.4f}, Max: {temp_tensor.max().item():.4f}")
+                self.logger.info(f"Iteration {i+1}/{max_iters}: NLL Loss = {loss_val:.4f}, Best = {best_loss:.4f}")
+                
+                # Sample some temperatures to show distribution
+                with torch.no_grad():
+                    z = model.encode(self.data.edge_index, self.data.edge_type)
+                    sample_heads = z[self.data.valid_edge_index[0][:100]]
+                    sample_rels = model.decoder.rel_emb[self.data.valid_edge_type[:100]]
+                    sample_temps = model.decoder.compute_temperature(sample_heads, sample_rels)
+                    
+                    self.logger.info(f"  Sample temperatures - Mean: {sample_temps.mean().item():.4f}, "
+                                   f"Std: {sample_temps.std().item():.4f}, "
+                                   f"Min: {sample_temps.min().item():.4f}, "
+                                   f"Max: {sample_temps.max().item():.4f}")
+            
+            # Early stopping for calibration
+            if patience_counter >= patience:
+                self.logger.info(f"Early stopping calibration at iteration {i+1}")
+                break
         
         self.logger.info("Temperature calibration finished.")
         
-        # Log final temperature
-        final_temp = model.decoder.temperature
-        if final_temp.dim() == 0 or final_temp.numel() == 1:
-            self.logger.info(f"Calibration complete! Final temperature: {final_temp.item():.4f}")
-            final_stats = {'temperature': final_temp.item()}
-        else:
-            self.logger.info(f"Calibration complete! Final temperature stats:")
-            self.logger.info(f"  Mean: {final_temp.mean().item():.4f}, Std: {final_temp.std().item():.4f}, Min: {final_temp.min().item():.4f}, Max: {final_temp.max().item():.4f}")
+        # Compute final temperature statistics
+        with torch.no_grad():
+            z = model.encode(self.data.edge_index, self.data.edge_type)
+            all_heads = z[self.data.valid_edge_index[0]]
+            all_rels = model.decoder.rel_emb[self.data.valid_edge_type]
+            final_temps = model.decoder.compute_temperature(all_heads, all_rels)
+            
             final_stats = {
-                'mean': final_temp.mean().item(),
-                'std': final_temp.std().item(),
-                'min': final_temp.min().item(),
-                'max': final_temp.max().item()
+                'mean': final_temps.mean().item(),
+                'std': final_temps.std().item(),
+                'min': final_temps.min().item(),
+                'max': final_temps.max().item(),
+                'final_loss': best_loss
             }
+            
+            self.logger.info(f"Calibration complete! Final temperature distribution:")
+            self.logger.info(f"  Mean: {final_stats['mean']:.4f}, Std: {final_stats['std']:.4f}")
+            self.logger.info(f"  Min: {final_stats['min']:.4f}, Max: {final_stats['max']:.4f}")
         
         # Unfreeze all parameters
         for param in model.parameters():

@@ -75,7 +75,15 @@ class TransE(KGEModel):
         head = F.normalize(head, p=self.p_norm, dim=-1)
         tail = F.normalize(tail, p=self.p_norm, dim=-1)
 
-        # Calculate *negative* TransE norm:
-        return -((head + rel) - tail).norm(p=self.p_norm, dim=-1)
+        # Calculate *negative* TransE norm (higher is better):
+        scores = -((head + rel) - tail).norm(p=self.p_norm, dim=-1, keepdim=True)  # [batch_size, 1]
+        
+        # Compute query-dependent temperature for each (head, relation) pair
+        temperature = self.compute_temperature(head, rel)  # [batch_size, 1]
+        
+        # Apply input-dependent temperature scaling
+        scores = scores / temperature  # [batch_size, 1]
+        
+        return scores.squeeze(-1)  # [batch_size]
 
     

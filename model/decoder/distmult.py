@@ -58,12 +58,18 @@ class DistMult(KGEModel):
         edge_index, edge_type
     ) -> Tensor:
 
-
         head, tail = X[edge_index[0]], X[edge_index[1]]
         rel = self.rel_emb[edge_type]
+        
+        # Compute query-dependent temperature for each (head, relation) pair
+        temperature = self.compute_temperature(head, rel)  # [batch_size, 1]
 
-        rel = rel / self.temperature
+        # Score computation: element-wise product
+        scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  # [batch_size, 1]
+        
+        # Apply input-dependent temperature scaling
+        scores = scores / temperature  # [batch_size, 1]
 
-        return torch.sum(head * rel * tail, dim=1) 
+        return scores.squeeze(-1)  # [batch_size] 
 
     

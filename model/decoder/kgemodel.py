@@ -34,12 +34,46 @@ class KGEModel(torch.nn.Module):
         self.num_relations = num_relations
         self.hidden_channels = hidden_channels
         self.rel_emb = Parameter(torch.FloatTensor(num_relations, hidden_channels))
-        self.temperature = torch.nn.Parameter(torch.ones(hidden_channels), requires_grad=False)
+        
+        # Input-dependent temperature prediction network
+        # Takes concatenated [head_emb, rel_emb] and outputs a single temperature scalar
+        self.use_input_dependent_temp = True  # Set to False for fixed temperature
+        self.temp_network = torch.nn.Sequential(
+            torch.nn.Linear(2 * hidden_channels, hidden_channels // 2),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_channels // 2, 1),
+            torch.nn.Softplus()  # Ensures temperature is positive
+        )
+        # Initialize to output ~1.0 (no scaling) initially
+        for param in self.temp_network.parameters():
+            param.data.normal_(0, 0.01)
 
 
     def reset_parameters(self):
         r"""Resets all learnable parameters of the module."""
         # self.rel_emb.reset_parameters()
+    
+    def compute_temperature(self, head_emb: Tensor, rel_emb: Tensor) -> Tensor:
+        r"""Computes input-dependent temperature for each query (h, r).
+        
+        Args:
+            head_emb: Head entity embeddings [batch_size, hidden_channels]
+            rel_emb: Relation embeddings [batch_size, hidden_channels]
+            
+        Returns:
+            Temperature scalar for each query [batch_size, 1]
+        """
+        if not self.use_input_dependent_temp:
+            # Return fixed temperature of 1.0
+            return torch.ones(head_emb.size(0), 1, device=head_emb.device)
+        
+        # Concatenate head and relation embeddings
+        query_emb = torch.cat([head_emb, rel_emb], dim=-1)  # [batch_size, 2*hidden_channels]
+        
+        # Predict temperature (add small epsilon to avoid division by zero)
+        temperature = self.temp_network(query_emb) + 0.01  # [batch_size, 1]
+        
+        return temperature
 
 
     def forward(
