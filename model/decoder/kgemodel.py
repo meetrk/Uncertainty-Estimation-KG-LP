@@ -34,7 +34,8 @@ class KGEModel(torch.nn.Module):
         self.num_relations = num_relations
         self.hidden_channels = hidden_channels
         self.rel_emb = Parameter(torch.FloatTensor(num_relations, hidden_channels))
-        # self.rel_emb = Embedding(num_relations, hidden_channels, sparse=sparse)
+        self.temperature = torch.nn.Parameter(torch.ones(hidden_channels), requires_grad=False)
+
 
     def reset_parameters(self):
         r"""Resets all learnable parameters of the module."""

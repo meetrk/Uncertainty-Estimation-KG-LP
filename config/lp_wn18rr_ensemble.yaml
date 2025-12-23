@@ -10,20 +10,14 @@ model:
     num_layers: 2
     dropout: 0.2
     num_bases: 5
-    w_init: schlichtkrull-normal
-    w_gain: false
-    b_init: zeros
 
   decoder:
     type: DistMult
     l2_penalty: 0.001
-    w_gain: false
-    b_init: false
 
-# Deep Ensemble Configuration
 ensemble:
   enabled: true
-  num_models: 5  # Number of ensemble members
+  num_models: 5 
   
 training:
   epochs: 10000
@@ -35,10 +29,6 @@ training:
     weight_decay: 0.0001
   evaluation_frequency: 100
   save_frequency: 50
-  evaluation:
-    batch_size: 512
-    filter_candidates: true
-    hits_at_k: 30
   early stopping:
     enabled: true
     patience: 10

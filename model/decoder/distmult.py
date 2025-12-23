@@ -1,9 +1,7 @@
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 from model.decoder.kgemodel import KGEModel
-from sklearn.metrics import roc_auc_score
 
 
 class DistMult(KGEModel):
@@ -46,6 +44,7 @@ class DistMult(KGEModel):
 
         self.margin = margin
 
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -63,6 +62,8 @@ class DistMult(KGEModel):
         head, tail = X[edge_index[0]], X[edge_index[1]]
         rel = self.rel_emb[edge_type]
 
-        return torch.sum(head * rel * tail, dim=1)
+        rel = rel / self.temperature
+
+        return torch.sum(head * rel * tail, dim=1) 
 
     

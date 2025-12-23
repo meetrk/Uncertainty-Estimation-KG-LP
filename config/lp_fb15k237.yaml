@@ -7,38 +7,32 @@ model:
     type: RGCN
     hidden_layer_size: 500
     embedding_dim: 500
-    num_layers: 2
-    dropout: 0.1
-    num_bases : 4
-    w_init: schlichtkrull-normal
-    w_gain: false
-    b_init: zeros
+    dropout: 0.2
+    num_bases : 5
 
   decoder:
     type: DistMult
     l2_penalty_type: schlichtkrull-l2
     l2_penalty : 0.01
-    w_gain: false
-    b_init: false
   
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 1
-    edge_dropout: 0.1
+    negative_sampling_ratio: 3
+    edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
     weight_decay: 0.0001
   evaluation_frequency: 500
   save_frequency: 1000
-  evaluation:
-    batch_size: 512
-    verbose: true
-    filter_candidates: true
-    hits_at_k: 10
   early stopping:
     enabled: true
     patience: 10
     delta: 0.001
-  test_uncertainty: true
-  checkpoint_path: ./checkpoints/FB15k-237_checkpoint_epoch_1500.pth
+  load_model: false
+  mc_samples: 1
+  checkpoint_path: ./checkpoints/FB15k-237_checkpoint_epoch_1000.pth
+calibration:
+  method: temperature_scaling
+  max_iters: 20
+  learning_rate: 0.01

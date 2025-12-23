@@ -7,12 +7,8 @@ model:
     type: RGCN
     hidden_layer_size: 500
     embedding_dim: 500
-    num_layers: 2
     dropout: 0.2
     num_bases : 5
-    w_init: schlichtkrull-normal
-    w_gain: false
-    b_init: zeros
 
   decoder:
     type: DistMult
@@ -24,19 +20,20 @@ training:
   epochs: 10000
   sampling:
     negative_sampling_ratio: 1
-    edge_dropout: 0.1
+    edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
     weight_decay: 0.0001
   evaluation_frequency: 100
   save_frequency: 50
-  evaluation:
-    batch_size: 512
-    filter_candidates: true
-    hits_at_k: 30
   early stopping:
     enabled: true
     patience: 10
     delta: 0.001
-  test_uncertainty: true
-  checkpoint_path: ./checkpoints/WN18RR_checkpoint_epoch_1700.pth
+  load_model: true
+  mc_samples: 1
+  checkpoint_path: ./checkpoints/WN18RR_checkpoint_best_model_label_smoothing.pth
+calibration:
+  method: temperature_scaling
+  max_iters: 50
+  learning_rate: 0.01
