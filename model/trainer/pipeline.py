@@ -27,7 +27,7 @@ class Pipeline:
         self.optimizer = torch.optim.Adam(
             model.parameters(), 
             lr=self.learning_rate, 
-            weight_decay=self.weight_decay
+            # weight_decay=self.weight_decay
         )
         self.all_triples = torch.stack([
                     self.data.edge_index[0],
@@ -143,12 +143,50 @@ class Pipeline:
 
     def load_pipeline(self, checkpoint_path, uncertainty_samples=5):
 
+
         self.load_checkpoint(checkpoint_path)
         self.logger.info("Pipeline loaded from checkpoint.")
+        
+        z = self.model.encode(self.data.edge_index, self.data.edge_type)
 
-        scores = self.test_link_pred(mc_samples=uncertainty_samples)
+        scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
+        self.logger.info(f"MRR: {scores['mrr']:.4f}")
+        self.logger.info(f"Mean Rank: {scores['mean_rank']:.4f}")
+        self.logger.info(f"Hits@1: {scores['hits@1']:.4f}")
+        self.logger.info(f"Hits@3: {scores['hits@3']:.4f}")
+        self.logger.info(f"Hits@10: {scores['hits@10']:.4f}")
 
-        return scores
+        scores = self.test_uncertainty(self.model,self.data)
+
+        self.logger.info(f"Brier_score: {scores['brier_score']}")
+        self.logger.info(f"ECE: {scores['ece']}")
+        self.logger.info(f"Prob_true: {scores['prob_true']}")
+        self.logger.info(f"Prob_pred: {scores['prob_pred']}")
+
+        self.logger.info(f" {scores}")
+
+        calibration_results = self.calibrate_pipeline(
+            method=self.config.get_section('calibration')['method'],
+            model=self.model,
+            max_iters=self.config.get_section('calibration').get('max_iters', 50),
+            lr=self.config.get_section('calibration').get('learning_rate', 0.01)
+        )
+
+        scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
+        self.logger.info(f"MRR: {scores['mrr']:.4f}")
+        self.logger.info(f"Mean Rank: {scores['mean_rank']:.4f}")
+        self.logger.info(f"Hits@1: {scores['hits@1']:.4f}")
+        self.logger.info(f"Hits@3: {scores['hits@3']:.4f}")
+        self.logger.info(f"Hits@10: {scores['hits@10']:.4f}")
+
+        scores = self.test_uncertainty(self.model,self.data)
+        self.logger.info(f"Brier_score: {scores['brier_score']}")
+        self.logger.info(f"ECE: {scores['ece']}")
+        self.logger.info(f"Prob_true: {scores['prob_true']}")
+        self.logger.info(f"Prob_pred: {scores['prob_pred']}")
+
+        self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
+        
 
     @torch.no_grad()
     def inference_mc(self, edge_index, edge_type, mc_samples=10):
@@ -158,13 +196,15 @@ class Pipeline:
             self.model.encoder.mc_dropout = True  
 
         neg_edge_index,neg_edge_type = negative_sampling(edge_index, edge_type, self.data.num_nodes,1)
-        print("Inference MC Samples:", mc_samples, self.model.encoder.mc_dropout)
+      
         preds_list = []
 
         for _ in range(mc_samples):
+            print("Inference MC Samples:", mc_samples, self.model.encoder.mc_dropout)
             z = self.model.encode(self.data.edge_index, self.data.edge_type)
             pos_out = self.model.decode(z, edge_index, edge_type)
             pos_out = torch.sigmoid(pos_out)
+
             neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
             neg_out = torch.sigmoid(neg_out)
 
@@ -172,7 +212,7 @@ class Pipeline:
             preds_list.append(out)
 
         self.model.encoder.mc_dropout = False
-        labels = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
+        labels = torch.cat([(torch.ones_like(pos_out)), (torch.zeros_like(neg_out))])
         preds_stack = torch.stack(preds_list)
         preds_mean = preds_stack.mean(dim=0)
         preds_var = preds_stack.var(dim=0)
@@ -274,19 +314,119 @@ class Pipeline:
         return valid_scores, None
 
     @torch.no_grad()
-    def test_uncertainty(self, mc_samples=10):
+    def test_uncertainty(self, model, data):
 
-        self.model.eval()
-        scores = self.inference_mc(self.data.valid_edge_index, self.data.valid_edge_type, mc_samples=mc_samples)
-
-        self.writer.add_scalar("MC_Uncertainty/Mean_Pred_Std", scores['preds_var'].mean(), mc_samples)
-        
-        val_scores = compute_uncertainty(scores['labels'], scores['preds_mean'])
-
-        print("Overall Uncertainty Scores:", val_scores)
-
+        scores, labels = self.inference(model, data)
+        val_scores = compute_uncertainty(scores, labels)
 
         return val_scores
+
+    def calibrate_pipeline(self, method, model, max_iters=50, lr=0.01):
+
+        if method == 'temperature_scaling':
+            temperature_values = self.calibrate_temperature(model, max_iters=max_iters, lr=lr)
+            return temperature_values
+        else:
+            raise ValueError("Unsupported calibration method specified")
+
+    def compute_nll_loss(self,model):
+        """
+        Compute Negative Log-Likelihood loss for calibration.
+        
+        Args:
+            model: The GAE model
+            data: Graph data
+            edge_index: Edge indices to evaluate
+            edge_type: Edge types
+            
+        Returns:
+            NLL loss value
+        """
+        model.eval()
+        with torch.no_grad():
+            z = model.encode(self.data.edge_index, self.data.edge_type)
+        
+        # Get positive logits (temperature is applied inside decoder)
+        pos_logits = model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
+        
+        # Sample negative edges for balanced calibration
+        neg_edge_index, neg_edge_type = negative_sampling(
+            self.data.valid_edge_index, 
+            self.data.valid_edge_type, 
+            self.data.num_nodes, 
+            1  
+        )
+        neg_logits = model.decode(z, neg_edge_index, neg_edge_type)
+        
+        # Concatenate positive and negative samples
+        logits = torch.cat([pos_logits, neg_logits])
+        labels = torch.cat([torch.ones_like(pos_logits), torch.zeros_like(neg_logits)])
+        
+        nll_loss = F.binary_cross_entropy_with_logits(logits, labels)
+        
+        return nll_loss
+
+
+    def calibrate_temperature(self, model, max_iters=50, lr=0.01):
+        """
+        Calibrate temperature parameter on validation set.
+        
+        Args:
+            model: The GAE model with temperature parameter
+            data: Graph data
+            val_edge_index: Validation edge indices
+            val_edge_type: Validation edge types
+            max_iters: Maximum calibration iterations
+            lr: Learning rate for temperature optimization
+            device: Device to run on
+            logger: Logger instance
+            
+        Returns:
+            Calibrated temperature value
+        """
+        # Freeze all parameters except temperature
+        for name, param in model.named_parameters():
+            if 'temperature' not in name:
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+                self.logger.info(f"Optimizing parameter: {name}, Initial value: {param.item():.4f}")
+        
+        # Optimizer for temperature only
+        temp_params = [p for name, p in model.named_parameters() if 'temperature' in name]
+        optimizer = torch.optim.LBFGS(temp_params, lr=lr, max_iter=max_iters)
+        
+        self.logger.info("Starting temperature calibration...")
+        self.logger.info(f"Initial temperature: {model.decoder.temperature.item():.4f}")
+        
+        
+        def eval_closure():
+            optimizer.zero_grad()
+            loss = self.compute_nll_loss(model)
+            loss.backward()
+            return loss
+        
+        temperature_values = []
+        # Optimize
+        for i in range(max_iters):
+            loss = optimizer.step(eval_closure)
+            current_temp = model.decoder.temperature.item()
+
+            temperature_values.append({'i': i + 1, 'temperature': current_temp, 'nll_loss': loss.item()})
+            if (i + 1) % 10 == 0:
+                self.logger.info(f"Iteration {i+1}/{max_iters}: NLL Loss = {loss.item():.4f}, Temperature = {current_temp:.4f}")
+        
+        self.logger.info("Temperature calibration finished.")
+        self.logger.info(f"Temperature values during calibration: {temperature_values}")
+        final_temp = model.decoder.temperature.item()
+        self.logger.info(f"Calibration complete! Final temperature: {final_temp:.4f}")
+        
+        # Unfreeze all parameters
+        for param in model.parameters():
+            param.requires_grad = True
+        
+        return final_temp
+
 
 
     def log_model_gradients(self, epoch):
@@ -324,8 +464,8 @@ class Pipeline:
             if isinstance(value, (int, float)):
                 self.writer.add_scalar(f'Hyperparameters/{key}', value, 0)
 
-    
-    def save_checkpoint(self, epoch):
+
+    def save_checkpoint(self, epoch, name = None):
         """Save model checkpoint."""
         checkpoint = {
             'epoch': epoch,
@@ -334,11 +474,12 @@ class Pipeline:
             'training_history': self.training_history,
             'config': self.config
         }
-        
+        if name is None:
+            name = f'{self.config.get_section("dataset")["name"]}_checkpoint_epoch_{epoch}.pth'
         checkpoint_dir = Path('checkpoints')
         checkpoint_dir.mkdir(exist_ok=True)
 
-        checkpoint_path = checkpoint_dir / f'{self.config.get_section("dataset")["name"]}_checkpoint_epoch_{epoch}.pth'
+        checkpoint_path = checkpoint_dir / name
         torch.save(checkpoint, checkpoint_path)
         
         self.logger.info(f"Checkpoint saved to {checkpoint_path}")
@@ -347,7 +488,7 @@ class Pipeline:
         """Load model checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
         
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(checkpoint['model_state_dict'],strict=False)
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.training_history = checkpoint.get('training_history', {'train_loss': [], 'eval_metrics': []})
         self.epoch = checkpoint['epoch']

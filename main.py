@@ -120,18 +120,20 @@ def main():
         config=config_loader,
         logger=logger
     )
-
-    train_config = config_loader.get_section('training')
-    if train_config['test_uncertainty']:
-        logger.info("Starting uncertainty evaluation on test set...")
-        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'],50)
-        return
-    # Start training
-    logger.info("Starting training process...")
-    training_results = pipeline.start_pipeline()
-    logger.info("Training process completed.")
+    calibration_config = config_loader.get_section('calibration')
     
-    logger.info(f"Training results: {training_results}")
+    train_config = config_loader.get_section('training')
+    if train_config['load_model']:
+        logger.info("Starting uncertainty evaluation on test set...")
+        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'],train_config['mc_samples'])
+        return
+    else:
+        # Start training
+        logger.info("Starting training process...")
+        training_results = pipeline.start_pipeline()
+        logger.info("Training process completed.")
+        
+        logger.info(f"Training results: {training_results}")
 
 
 if __name__ == "__main__":

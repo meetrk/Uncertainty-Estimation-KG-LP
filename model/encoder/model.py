@@ -27,10 +27,6 @@ class RGCN(nn.Module):
         self.hidden_layer_size = model_config['encoder']['hidden_layer_size']
         self.num_nodes = num_nodes
         self.num_relations = num_relations
-
-        self.w_init = model_config['encoder'].get('w_init', None)
-        self.w_gain = model_config['encoder'].get('w_gain', False)
-        self.b_init = model_config['encoder'].get('b_init', False)
         self.mc_dropout = False
         
         # Entity embeddings (encoder)
