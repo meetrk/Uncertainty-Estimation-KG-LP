@@ -26,8 +26,7 @@ class Pipeline:
 
         self.optimizer = torch.optim.Adam(
             model.parameters(), 
-            lr=self.learning_rate, 
-            # weight_decay=self.weight_decay
+            lr=self.learning_rate,
         )
         self.all_triples = torch.stack([
                     self.data.edge_index[0],
@@ -89,7 +88,7 @@ class Pipeline:
                     best_val_mrr = current_val_mrr
                     patience_counter = 0
                     
-                    self.logger.info(f"New best model found! MRR: {best_val_mrr:.4f} > Previous: {best_val_mrr:.4f}")
+                    self.logger.info(f"New best model found! MRR: {current_val_mrr:.4f} > Previous: {best_val_mrr:.4f}")
                     self.save_checkpoint(epoch) 
                 else:
                     patience_counter += 1
@@ -141,29 +140,24 @@ class Pipeline:
         self.logger.info("Training completed!")
         return self.training_history
 
-    def load_pipeline(self, checkpoint_path, uncertainty_samples=5):
+    def load_pipeline(self, checkpoint_path, method,uncertainty_samples=5):
 
 
         self.load_checkpoint(checkpoint_path)
         self.logger.info("Pipeline loaded from checkpoint.")
         
-        z = self.model.encode(self.data.edge_index, self.data.edge_type)
+        scores = self.test_link_pred(
+            method=method,
+            model=self.model,
+            valid_edge_index=self.data.valid_edge_index,
+            valid_edge_type=self.data.valid_edge_type,
+            mc_samples=uncertainty_samples)
 
-        scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
-        self.logger.info(f"MRR: {scores['mrr']:.4f}")
-        self.logger.info(f"Mean Rank: {scores['mean_rank']:.4f}")
-        self.logger.info(f"Hits@1: {scores['hits@1']:.4f}")
-        self.logger.info(f"Hits@3: {scores['hits@3']:.4f}")
-        self.logger.info(f"Hits@10: {scores['hits@10']:.4f}")
-
-        scores = self.test_uncertainty(self.model,self.data.edge_index, self.data.edge_type, self.data.valid_edge_index, self.data.valid_edge_type)
-
-        self.logger.info(f"Brier_score: {scores['brier_score']}")
-        self.logger.info(f"ECE: {scores['ece']}")
-        self.logger.info(f"Prob_true: {scores['prob_true']}")
-        self.logger.info(f"Prob_pred: {scores['prob_pred']}")
-
-        self.logger.info(f" {scores}")
+        scores = self.test_uncertainty(
+            self.model,self.data.edge_index,
+            self.data.edge_type,
+            self.data.valid_edge_index,
+            self.data.valid_edge_type)
 
         calibration_results = self.calibrate_pipeline(
             method=self.config.get_section('calibration')['method'],
@@ -172,12 +166,13 @@ class Pipeline:
             lr=self.config.get_section('calibration').get('learning_rate', 0.01)
         )
 
-        scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
-        self.logger.info(f"MRR: {scores['mrr']:.4f}")
-        self.logger.info(f"Mean Rank: {scores['mean_rank']:.4f}")
-        self.logger.info(f"Hits@1: {scores['hits@1']:.4f}")
-        self.logger.info(f"Hits@3: {scores['hits@3']:.4f}")
-        self.logger.info(f"Hits@10: {scores['hits@10']:.4f}")
+        scores = self.test_link_pred(
+            method=method,
+            model=self.model,
+            valid_edge_index=self.data.valid_edge_index,
+            valid_edge_type=self.data.valid_edge_type,
+            mc_samples=uncertainty_samples)
+
 
         scores = self.test_uncertainty(self.model,self.data.edge_index, self.data.edge_type, self.data.test_edge_index, self.data.test_edge_type)
         self.logger.info(f"Brier_score: {scores['brier_score']}")
@@ -215,11 +210,9 @@ class Pipeline:
         labels = torch.cat([(torch.ones_like(pos_out)), (torch.zeros_like(neg_out))])
         preds_stack = torch.stack(preds_list)
         preds_mean = preds_stack.mean(dim=0)
-        preds_var = preds_stack.var(dim=0)
 
         means = {
             'preds_mean': preds_mean,
-            'preds_var': preds_var,
             'labels': labels    
         }
 
@@ -240,19 +233,31 @@ class Pipeline:
         return scores, labels
 
     @torch.no_grad()
-    def test_link_pred(self, mc_samples=10):
+    def test_link_pred(self, method, model, valid_edge_index, valid_edge_type,  mc_samples=10):
+        model.eval()
+        if method == 'standard':
+            
+            scores = compute_mrr(valid_edge_index, valid_edge_type ,self.data, model)   
+            self.logger.info(f"MRR: {scores['mrr']:.4f}")
+            self.logger.info(f"Mean Rank: {scores['mean_rank']:.4f}")
+            self.logger.info(f"Hits@1: {scores['hits@1']:.4f}")
+            self.logger.info(f"Hits@3: {scores['hits@3']:.4f}")
+            self.logger.info(f"Hits@10: {scores['hits@10']:.4f}")
 
-        self.model.eval()
-        scores = compute_mrr_mc_dropout(self.data.train_edge_index, self.data.train_edge_type,
-                               self.data.valid_edge_index, self.data.valid_edge_type,
-                               self.data, self.model, mc_samples=mc_samples)
-        
+        elif method == 'mc_dropout':
+            
+            scores = compute_mrr_mc_dropout(self.data.edge_index, self.data.edge_type,
+                                valid_edge_index, valid_edge_type,
+                                self.data, model, mc_samples=mc_samples)
+            
+            self.logger.info(f"MRR = {scores['mrr']:.4f}")
+            self.logger.info(f"Mean Rank = {scores['mean_rank']:.4f}")
+            self.logger.info(f"Hits@1 = {scores['hits@1']:.4f}")
+            self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
+            self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
 
-        self.logger.info(f"MRR = {scores['mrr']:.4f}")
-        self.logger.info(f"Mean Rank = {scores['mean_rank']:.4f}")
-        self.logger.info(f"Hits@1 = {scores['hits@1']:.4f}")
-        self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
-        self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
+        else:
+            raise ValueError(f"Unsupported evaluation method: {method}")
         
         return scores
 
@@ -292,36 +297,13 @@ class Pipeline:
         return float(loss)
 
     @torch.no_grad()
-    def validate(self):
-        """
-        Validate the model on the validation set.
-        """
-        self.model.eval()
-        self.optimizer.zero_grad()
-
-        z = self.model.encode(self.data.edge_index, self.data.edge_type)
-
-        pos_out = self.model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
-
-        neg_edge_index = negative_sampling(self.data.valid_edge_index, self.data.num_nodes,10)
-        neg_out = self.model.decode(z, neg_edge_index, self.data.valid_edge_type)
-
-        out = torch.cat([pos_out, neg_out])
-        gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
-        cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
-        reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
-        loss = cross_entropy_loss + self.model_config['decoder']['l2_penalty'] * reg_loss
-
-        return float(loss)
-    
-    @torch.no_grad()
     def test(self, test = True):
 
         self.model.eval()
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
-        valid_scores = compute_mrr(z, self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
+        valid_scores = compute_mrr(self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
         if test:
-            test_scores = compute_mrr(z, self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
+            test_scores = compute_mrr(self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
             return valid_scores, test_scores
 
         return valid_scores, None
@@ -332,17 +314,84 @@ class Pipeline:
         scores, labels = self.inference(model, edge_index, edge_type, test_edge_index, test_edge_type)
         val_scores = compute_uncertainty(labels,scores)
 
+        self.logger.info(f"Brier_score: {val_scores['brier_score']}")
+        self.logger.info(f"ECE: {val_scores['ece']}")
+        self.logger.info(f"Prob_true: {val_scores['prob_true']}")
+        self.logger.info(f"Prob_pred: {val_scores['prob_pred']}")
+
+        self.logger.info(f" {val_scores}")
+
         return val_scores
 
     def calibrate_pipeline(self, method, model, max_iters=50, lr=0.01):
+        """Main entry point for calibration."""
 
-        if method == 'temperature_scaling':
-            temperature_values = self.calibrate_temperature(model, max_iters=max_iters, lr=lr)
-            return temperature_values
+        self.logger.info("Starting calibration process...")
+        
+        if method == 'scalar':
+            return self.calibrate_scalar_temperature(model, max_iters, lr)
+        elif method == 'input_scaling':
+            return self.calibrate_input_dependent_temperature(model, max_iters, lr)
         else:
-            raise ValueError("Unsupported calibration method specified")
+            raise ValueError(f"Unsupported calibration method: {method}")
+    
+    def _get_temperature_stats(self, model, edge_index, edge_type, num_samples=None):
+        """Compute temperature statistics for validation samples.
+        
+        Returns:
+            dict: Temperature statistics (mean, std, min, max)
+        """
+        with torch.no_grad():
+            z = model.encode(self.data.edge_index, self.data.edge_type)
+            
+            if num_samples is not None:
+                edge_index = edge_index[:, :num_samples]
+                edge_type = edge_type[:num_samples]
+            
+            heads = z[edge_index[0]]
+            rels = model.decoder.rel_emb[edge_type]
+            temps = model.decoder.compute_temperature(heads, rels)
+            
+            return {
+                'mean': temps.mean().item(),
+                'std': temps.std().item(),
+                'min': temps.min().item(),
+                'max': temps.max().item()
+            }
+    
+    def _log_temperature_stats(self, stats, prefix="", level="info"):
+        """Log temperature statistics in a consistent format."""
+        msg = f"{prefix}Temperature - Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}, Min: {stats['min']:.4f}, Max: {stats['max']:.4f}"
+        if level == "info":
+            self.logger.info(msg)
+        else:
+            self.logger.debug(msg)
+    
+    def _freeze_non_temperature_params(self, model, param_filter):
+        """Freeze all parameters except those matching the filter.
+        
+        Args:
+            model: The model to freeze parameters in
+            param_filter: Function that returns True if parameter should be trainable
+        
+        Returns:
+            list: Trainable parameters
+        """
+        trainable_params = []
+        for name, param in model.named_parameters():
+            if param_filter(name):
+                param.requires_grad = True
+                trainable_params.append(param)
+                self.logger.info(f"Trainable: {name}, Shape: {param.shape}")
+            else:
+                param.requires_grad = False
+        
+        if not trainable_params:
+            self.logger.warning("No trainable parameters found for calibration!")
+        
+        return trainable_params
 
-    def compute_nll_loss(self, model, lambda_reg=0.01):
+    def compute_nll_loss(self,model):
         """
         Compute Negative Log-Likelihood loss for calibration.
         
@@ -351,7 +400,6 @@ class Pipeline:
             data: Graph data
             edge_index: Edge indices to evaluate
             edge_type: Edge types
-            lambda_reg: L2 regularization strength for temperature
             
         Returns:
             NLL loss value
@@ -378,120 +426,97 @@ class Pipeline:
         
         nll_loss = F.binary_cross_entropy_with_logits(logits, labels)
         
-        # Optional: Add L2 regularization on temperature network weights
-        # This helps prevent extreme temperature values
-        if hasattr(model.decoder, 'temp_network') and lambda_reg > 0:
-            temp_reg = 0
-            for param in model.decoder.temp_network.parameters():
-                temp_reg += torch.sum(param ** 2)
-            temp_reg = lambda_reg * temp_reg
-            return nll_loss + temp_reg
-        
         return nll_loss
 
-
-    def calibrate_temperature(self, model, max_iters=50, lr=0.01):
-        """
-        Calibrate temperature parameter on validation set.
-        For input-dependent temperature, this calibrates the temperature prediction network.
+    def calibrate_input_dependent_temperature(self, model, max_iters=50, lr=0.01):
+        """Calibrate input-dependent temperature network on validation set.
+        
+        This method learns a small neural network that predicts per-query
+        temperature values T(h,r) for each query, allowing the model to
+        express uncertainty adaptively while preserving ranking.
         
         Args:
-            model: The GAE model with temperature parameter/network
-            max_iters: Maximum calibration iterations
-            lr: Learning rate for temperature optimization
+            model: GAE model with temp_network
+            max_iters: Maximum optimization iterations
+            lr: Learning rate for Adam optimizer
             
         Returns:
-            Calibrated temperature statistics
+            dict: Final temperature statistics and loss
+
         """
-        # Freeze all parameters except temperature-related ones
-        for name, param in model.named_parameters():
-            if 'temp_network' not in name and 'temperature' not in name:
-                param.requires_grad = False
-            else:
-                param.requires_grad = True
-                self.logger.info(f"Optimizing parameter: {name}, Shape: {param.shape}")
-        
-        # Get temperature parameters
-        temp_params = [p for name, p in model.named_parameters() 
-                      if 'temp_network' in name or 'temperature' in name]
+
+        self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
+
+      
+
+        # Freeze all parameters except temperature network
+        temp_params = self._freeze_non_temperature_params(
+            model, 
+            lambda name: 'temp_network' in name or 'temperature' in name
+        )
         
         if not temp_params:
-            self.logger.warning("No temperature parameters found for calibration!")
             return {}
         
-        # Use Adam optimizer for neural network (better than LBFGS for MLPs)
         optimizer = torch.optim.Adam(temp_params, lr=lr)
         
-        self.logger.info("Starting input-dependent temperature calibration...")
-        self.logger.info(f"Calibrating {len(temp_params)} temperature network parameters")
+        self.logger.info("="*60)
+        self.logger.info("Starting Input-Dependent Temperature Calibration")
+        self.logger.info(f"Parameters to optimize: {len(temp_params)}")
+        self.logger.info(f"Max iterations: {max_iters}, Learning rate: {lr}")
+        self.logger.info("="*60)
         
+        # Training loop with early stopping
         best_loss = float('inf')
-        patience_counter = 0
-        patience = 5
+        patience, patience_counter = 5, 0
         
-        temperature_values = []
-        
-        # Optimize
-        for i in range(max_iters):
+        for iteration in range(1, max_iters + 1):
+            # Optimization step
             optimizer.zero_grad()
             loss = self.compute_nll_loss(model)
             loss.backward()
-            
-            # Clip gradients to prevent explosion
             torch.nn.utils.clip_grad_norm_(temp_params, max_norm=1.0)
-            
             optimizer.step()
             
-            # Log progress
+            # Track best loss for early stopping
             loss_val = loss.item()
-            temperature_values.append({'iteration': i + 1, 'nll_loss': loss_val})
-            
             if loss_val < best_loss:
                 best_loss = loss_val
                 patience_counter = 0
             else:
                 patience_counter += 1
             
-            if (i + 1) % 10 == 0:
-                self.logger.info(f"Iteration {i+1}/{max_iters}: NLL Loss = {loss_val:.4f}, Best = {best_loss:.4f}")
+            # Periodic logging
+            if iteration % 10 == 0:
+                self.logger.info(f"Iter {iteration}/{max_iters}: NLL={loss_val:.4f}, Best={best_loss:.4f}")
                 
-                # Sample some temperatures to show distribution
-                with torch.no_grad():
-                    z = model.encode(self.data.edge_index, self.data.edge_type)
-                    sample_heads = z[self.data.valid_edge_index[0][:100]]
-                    sample_rels = model.decoder.rel_emb[self.data.valid_edge_type[:100]]
-                    sample_temps = model.decoder.compute_temperature(sample_heads, sample_rels)
-                    
-                    self.logger.info(f"  Sample temperatures - Mean: {sample_temps.mean().item():.4f}, "
-                                   f"Std: {sample_temps.std().item():.4f}, "
-                                   f"Min: {sample_temps.min().item():.4f}, "
-                                   f"Max: {sample_temps.max().item():.4f}")
+                # Log sample temperature distribution
+                stats = self._get_temperature_stats(
+                    model, 
+                    self.data.valid_edge_index, 
+                    self.data.valid_edge_type, 
+                    num_samples=100
+                )
+                self._log_temperature_stats(stats, prefix="  Sample ")
             
-            # Early stopping for calibration
+            # Early stopping check
             if patience_counter >= patience:
-                self.logger.info(f"Early stopping calibration at iteration {i+1}")
+                self.logger.info(f"Early stopping at iteration {iteration}")
                 break
         
-        self.logger.info("Temperature calibration finished.")
+        # Compute and log final statistics
+        final_stats = self._get_temperature_stats(
+            model,
+            self.data.valid_edge_index,
+            self.data.valid_edge_type
+        )
+        final_stats['final_loss'] = best_loss
         
-        # Compute final temperature statistics
-        with torch.no_grad():
-            z = model.encode(self.data.edge_index, self.data.edge_type)
-            all_heads = z[self.data.valid_edge_index[0]]
-            all_rels = model.decoder.rel_emb[self.data.valid_edge_type]
-            final_temps = model.decoder.compute_temperature(all_heads, all_rels)
-            
-            final_stats = {
-                'mean': final_temps.mean().item(),
-                'std': final_temps.std().item(),
-                'min': final_temps.min().item(),
-                'max': final_temps.max().item(),
-                'final_loss': best_loss
-            }
-            
-            self.logger.info(f"Calibration complete! Final temperature distribution:")
-            self.logger.info(f"  Mean: {final_stats['mean']:.4f}, Std: {final_stats['std']:.4f}")
-            self.logger.info(f"  Min: {final_stats['min']:.4f}, Max: {final_stats['max']:.4f}")
+        self.logger.info("="*60)
+        self.logger.info("Calibration Complete!")
+        self._log_temperature_stats(final_stats, prefix="Final ")
+        self.logger.info(f"Final NLL Loss: {best_loss:.4f}")
+        self.logger.info("="*60)
         
         # Unfreeze all parameters
         for param in model.parameters():
@@ -499,6 +524,70 @@ class Pipeline:
         
         return final_stats
 
+    def calibrate_scalar_temperature(self, model, max_iters=50, lr=0.01):
+        """Calibrate single scalar temperature parameter on validation set.
+        
+        This is the traditional temperature scaling approach where a single
+        scalar T divides all logits uniformly.
+        
+        Args:
+            model: GAE model with scalar temperature parameter
+            max_iters: Maximum LBFGS iterations
+            lr: Learning rate for LBFGS
+            
+        Returns:
+            float: Calibrated temperature value
+        """
+        self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
+
+        # Freeze all parameters except temperature
+        temp_params = self._freeze_non_temperature_params(
+            model,
+            lambda name: 'temperature' in name
+        )
+        
+        if not temp_params:
+            self.logger.error("No temperature parameter found!")
+            return None
+        
+        initial_temp = model.decoder.temperature.item()
+        self.logger.info("="*60)
+        self.logger.info("Starting Scalar Temperature Calibration")
+        self.logger.info(f"Initial temperature: {initial_temp:.4f}")
+        self.logger.info("="*60)
+        
+        # Use LBFGS for scalar optimization (quasi-Newton method)
+        optimizer = torch.optim.LBFGS(temp_params, lr=lr, max_iter=max_iters)
+        
+        def eval_closure():
+            optimizer.zero_grad()
+            loss = self.compute_nll_loss(model)
+            loss.backward()
+            return loss
+        
+        # Optimize temperature
+        for iteration in range(1, max_iters + 1):
+            loss = optimizer.step(eval_closure)
+            current_temp = model.decoder.temperature.item()
+            
+            if iteration % 10 == 0:
+                self.logger.info(
+                    f"Iter {iteration}/{max_iters}: "
+                    f"NLL={loss.item():.4f}, T={current_temp:.4f}"
+                )
+        
+        final_temp = model.decoder.temperature.item()
+        
+        self.logger.info("="*60)
+        self.logger.info("Calibration Complete!")
+        self.logger.info(f"Final temperature: {final_temp:.4f} (Δ={final_temp - initial_temp:+.4f})")
+        self.logger.info("="*60)
+        
+        # Unfreeze all parameters
+        for param in model.parameters():
+            param.requires_grad = True
+        
+        return final_temp
 
 
     def log_model_gradients(self, epoch):

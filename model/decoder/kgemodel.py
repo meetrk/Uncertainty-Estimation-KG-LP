@@ -2,13 +2,10 @@ from typing import Tuple
 
 import torch
 from torch import Tensor
-from torch.nn import Embedding
 from tqdm import tqdm
 from torch.nn import Parameter
 import torch.nn.functional as F
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
-
-from torch_geometric.nn.kge.loader import KGTripletLoader
 
 
 class KGEModel(torch.nn.Module):
@@ -27,6 +24,7 @@ class KGEModel(torch.nn.Module):
         num_relations: int,
         hidden_channels: int,
         sparse: bool = False,
+        calibration: str = "none"
     ):
         super().__init__()
 
@@ -34,19 +32,31 @@ class KGEModel(torch.nn.Module):
         self.num_relations = num_relations
         self.hidden_channels = hidden_channels
         self.rel_emb = Parameter(torch.FloatTensor(num_relations, hidden_channels))
-        
-        # Input-dependent temperature prediction network
-        # Takes concatenated [head_emb, rel_emb] and outputs a single temperature scalar
-        self.use_input_dependent_temp = True  # Set to False for fixed temperature
-        self.temp_network = torch.nn.Sequential(
-            torch.nn.Linear(2 * hidden_channels, hidden_channels // 2),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_channels // 2, 1),
-            torch.nn.Softplus()  # Ensures temperature is positive
-        )
-        # Initialize to output ~1.0 (no scaling) initially
-        for param in self.temp_network.parameters():
-            param.data.normal_(0, 0.01)
+        self.calibration = calibration
+        self.temperature = Parameter(torch.ones(1), requires_grad=False)
+
+        if self.calibration == "scalar":
+            self.temperature = Parameter(torch.ones(1), requires_grad=False)
+
+        elif self.calibration == "input_dependent":
+            self.use_input_dependent_temp = True  # Set to False for fixed temperature
+            self.temp_network = torch.nn.Sequential(
+                torch.nn.Linear(2 * hidden_channels, hidden_channels // 2),
+                torch.nn.ReLU(),
+                torch.nn.Linear(hidden_channels // 2, 1),
+                torch.nn.Softplus()  
+            )
+            # Initialize to output ~1.0 (no scaling) initially
+            for param in self.temp_network.parameters():
+                param.data.normal_(0, 0.01)
+
+        elif self.calibration == "none":
+            pass
+        else:
+            raise ValueError("Unsupported calibration method specified")
+
+
+
 
 
     def reset_parameters(self):

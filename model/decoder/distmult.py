@@ -39,11 +39,12 @@ class DistMult(KGEModel):
         hidden_channels: int,
         margin: float = 1.0,
         sparse: bool = False,
+        calibration: str = "none",
+        
     ):
-        super().__init__(num_nodes, num_relations, hidden_channels, sparse)
+        super().__init__(num_nodes, num_relations, hidden_channels, sparse, calibration)
 
         self.margin = margin
-
 
         self.reset_parameters()
 
@@ -60,16 +61,28 @@ class DistMult(KGEModel):
 
         head, tail = X[edge_index[0]], X[edge_index[1]]
         rel = self.rel_emb[edge_type]
+
+        if self.calibration == "input_dependent":
+            # Compute query-dependent temperature for each (head, relation) pair
+            temperature = self.compute_temperature(head, rel)  # [batch_size, 1]
+
+            # Score computation: element-wise product
+            scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  # [batch_size, 1]
+            
+            # Apply input-dependent temperature scaling
+            scores = scores / temperature  # [batch_size, 1]
+
+            return scores.squeeze(-1)  # [batch_size] 
+            
+        elif self.calibration == "scalar":
+            
+            scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  
+            scores = scores / self.temperature 
+            
+            return scores
         
-        # Compute query-dependent temperature for each (head, relation) pair
-        temperature = self.compute_temperature(head, rel)  # [batch_size, 1]
-
-        # Score computation: element-wise product
-        scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  # [batch_size, 1]
+        else:
+            scores  = torch.sum(head * rel * tail, dim=1, keepdim=True)
+            return scores
         
-        # Apply input-dependent temperature scaling
-        scores = scores / temperature  # [batch_size, 1]
-
-        return scores.squeeze(-1)  # [batch_size] 
-
-    
+        # return scores.squeeze(-1)  # [batch_size] 

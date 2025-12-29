@@ -70,7 +70,10 @@ def compute_rank(ranks):
 
 
 @torch.no_grad()
-def compute_mrr(z, edge_index, edge_type, data, model):
+def compute_mrr( edge_index, edge_type, data, model):
+
+    z = model.encode(data.edge_index, data.edge_type)
+
     ranks = []
     for i in tqdm(range(edge_type.numel())):
         (src, dst), rel = edge_index[:, i], edge_type[i]
@@ -126,11 +129,7 @@ def compute_mrr(z, edge_index, edge_type, data, model):
 @torch.no_grad()
 def compute_mrr_emsemble(train_edge_index, train_edge_type, edge_index, edge_type, data, models: DeepEnsemble):
     """
-    Compute MRR for ensemble with optimized encoding caching.
-    
-    Key optimization: Encode the graph once per model, reuse for all triples.
-    This reduces complexity from O(N_models × N_triples × encoding_cost) 
-    to O(N_models × encoding_cost + N_models × N_triples × decoding_cost).
+    Compute MRR for ensemble
     """
     # OPTIMIZATION: Encode graph once per model and cache
     all_z = []
@@ -208,13 +207,7 @@ def compute_mrr_emsemble(train_edge_index, train_edge_type, edge_index, edge_typ
 
 @torch.no_grad()
 def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_type, data, model, mc_samples=10):
-    """
-    Compute MRR for ensemble with optimized encoding caching.
-    
-    Key optimization: Encode the graph once per model, reuse for all triples.
-    This reduces complexity from O(N_models × N_triples × encoding_cost) 
-    to O(N_models × encoding_cost + N_models × N_triples × decoding_cost).
-    """
+
     # OPTIMIZATION: Encode graph once per model and cache
     all_z = []
     model.encoder.mc_dropout = True
