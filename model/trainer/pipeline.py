@@ -1,4 +1,3 @@
-from pyexpat import model
 import torch
 from pathlib import Path
 import torch
@@ -140,7 +139,7 @@ class Pipeline:
         self.logger.info("Training completed!")
         return self.training_history
 
-    def load_pipeline(self, checkpoint_path, method,uncertainty_samples=5):
+    def load_pipeline(self, checkpoint_path, method, uncertainty_samples=5):
 
 
         self.load_checkpoint(checkpoint_path)
@@ -154,7 +153,9 @@ class Pipeline:
             mc_samples=uncertainty_samples)
 
         scores = self.test_uncertainty(
-            self.model,self.data.edge_index,
+            self.model,
+            method,
+            self.data.edge_index,
             self.data.edge_type,
             self.data.valid_edge_index,
             self.data.valid_edge_type)
@@ -174,30 +175,32 @@ class Pipeline:
             mc_samples=uncertainty_samples)
 
 
-        scores = self.test_uncertainty(self.model,self.data.edge_index, self.data.edge_type, self.data.test_edge_index, self.data.test_edge_type)
-        self.logger.info(f"Brier_score: {scores['brier_score']}")
-        self.logger.info(f"ECE: {scores['ece']}")
-        self.logger.info(f"Prob_true: {scores['prob_true']}")
-        self.logger.info(f"Prob_pred: {scores['prob_pred']}")
+        scores = self.test_uncertainty(
+            self.model,
+            method,
+            self.data.edge_index,
+            self.data.edge_type,
+            self.data.test_edge_index,
+            self.data.test_edge_type)
 
         self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
         
 
     @torch.no_grad()
-    def inference_mc(self, edge_index, edge_type, mc_samples=10):
+    def inference_mc(self, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples=10):
 
         self.model.eval()
         if mc_samples > 1:
             self.model.encoder.mc_dropout = True  
 
-        neg_edge_index,neg_edge_type = negative_sampling(edge_index, edge_type, self.data.num_nodes,1)
+        neg_edge_index,neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes,1)
       
         preds_list = []
 
         for _ in range(mc_samples):
             print("Inference MC Samples:", mc_samples, self.model.encoder.mc_dropout)
-            z = self.model.encode(self.data.edge_index, self.data.edge_type)
-            pos_out = self.model.decode(z, edge_index, edge_type)
+            z = self.model.encode(edge_index, edge_type)
+            pos_out = self.model.decode(z, test_edge_index, test_edge_type)
             pos_out = torch.sigmoid(pos_out)
 
             neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
@@ -210,13 +213,7 @@ class Pipeline:
         labels = torch.cat([(torch.ones_like(pos_out)), (torch.zeros_like(neg_out))])
         preds_stack = torch.stack(preds_list)
         preds_mean = preds_stack.mean(dim=0)
-
-        means = {
-            'preds_mean': preds_mean,
-            'labels': labels    
-        }
-
-        return means
+        return preds_mean, labels
 
     @torch.no_grad()
     def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type):
@@ -309,10 +306,21 @@ class Pipeline:
         return valid_scores, None
 
     @torch.no_grad()
-    def test_uncertainty(self, model, edge_index, edge_type, test_edge_index, test_edge_type):
+    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type):
 
-        scores, labels = self.inference(model, edge_index, edge_type, test_edge_index, test_edge_type)
-        val_scores = compute_uncertainty(labels,scores)
+        if method == 'mc_dropout':
+            scores, labels = self.inference_mc(
+                edge_index,
+                edge_type,
+                test_edge_index,
+                test_edge_type,
+                mc_samples=self.config.get_section('calibration').get('mc_samples',10))
+            val_scores = compute_uncertainty(labels,scores)
+        elif method == 'standard':
+            scores, labels = self.inference(model, edge_index, edge_type, test_edge_index, test_edge_type)
+            val_scores = compute_uncertainty(labels,scores)
+        else:
+            raise ValueError(f"Unsupported uncertainty estimation method: {method}")
 
         self.logger.info(f"Brier_score: {val_scores['brier_score']}")
         self.logger.info(f"ECE: {val_scores['ece']}")
@@ -660,3 +668,4 @@ class Pipeline:
         """Cleanup TensorBoard writer when pipeline is destroyed."""
         if hasattr(self, 'writer'):
             self.writer.close()
+

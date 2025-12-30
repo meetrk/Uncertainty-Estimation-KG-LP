@@ -1,35 +1,6 @@
-from utils.dataset_loader import load_dataset, generate_data
 import torch
 from random import sample
 import numpy as np
-
-
-def setup_and_load_dataset(dataset_config, logger):
-    """
-    Load dataset and generate PyTorch Geometric graph data.
-    
-    Args:
-        dataset_config: Configuration for dataset loading
-        logger: Logger instance
-        
-    Returns:
-        PyTorch Geometric Data object
-    """
-    logger.info("Loading dataset...")
-    dataset = load_dataset(dataset_config)
-    
-    logger.info("Generating graph data...")
-    data = generate_data(*dataset)
-
-    
-    logger.info(f"Graph data created with {data.num_nodes} nodes")
-    if hasattr(data, 'edge_index') and data.edge_index is not None:
-        logger.info(f"Number of edges: {data.edge_index.shape[1]}")
-    if hasattr(data, 'edge_type') and data.edge_type is not None:
-        logger.info(f"Number of relation types: {data.edge_type.max().item() + 1}")
-    
-    logger.info("Dataset loading completed successfully!")
-    return data
 
 
 def get_triples(edge_index, edge_type):
@@ -184,39 +155,6 @@ def generate_batch_triples(triples, num_nodes, config, mode, sampling="sample"):
     
     return batch
 
-
-def negative_sampling_1(edge_index, edge_type, num_nodes, n_neg=1):
-    """
-    Generates n_neg negative samples for each positive edge, preserving edge types.
-    
-    Args:
-        edge_index: (2, E)
-        edge_type: (E, )
-        num_nodes: int
-        n_neg: int
-    """
-    
-    # 1. Repeat the edges (2, E * n)
-    # Pattern: [Batch, Batch, ...]
-    neg_edge_index = edge_index.repeat(1, n_neg)
-    
-    # 2. Repeat the types (E * n, ) to match the edges
-    # Pattern: [Batch, Batch, ...]
-    neg_edge_type = edge_type.repeat(n_neg)
-    
-    # 3. Standard corruption logic (same as before)
-    total_neg_samples = neg_edge_index.size(1)
-    
-    mask_1 = torch.rand(total_neg_samples) < 0.5
-    mask_2 = ~mask_1
-
-    rnd_nodes = torch.randint(num_nodes, (total_neg_samples, ), 
-                              device=neg_edge_index.device)
-
-    neg_edge_index[0, mask_1] = rnd_nodes[mask_1]
-    neg_edge_index[1, mask_2] = rnd_nodes[mask_2]
-    
-    return neg_edge_index, neg_edge_type
 
 def negative_sampling(edge_index,edge_type,num_nodes,n_neg=1):
     # Sample edges by corrupting either the subject or the object of each edge.
