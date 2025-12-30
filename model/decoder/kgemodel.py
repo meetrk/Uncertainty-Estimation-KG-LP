@@ -33,7 +33,6 @@ class KGEModel(torch.nn.Module):
         self.hidden_channels = hidden_channels
         self.rel_emb = Parameter(torch.FloatTensor(num_relations, hidden_channels))
         self.calibration = calibration
-        self.temperature = Parameter(torch.ones(1), requires_grad=False)
 
         if self.calibration == "scalar":
             self.temperature = Parameter(torch.ones(1), requires_grad=False)
@@ -51,7 +50,7 @@ class KGEModel(torch.nn.Module):
                 param.data.normal_(0, 0.01)
 
         elif self.calibration == "none":
-            pass
+            self.temperature = Parameter(torch.ones(1), requires_grad=False)
         else:
             raise ValueError("Unsupported calibration method specified")
 
@@ -99,38 +98,6 @@ class KGEModel(torch.nn.Module):
             tail_index (torch.Tensor): The tail indices.
         """
         raise NotImplementedError
-
-    def loss(
-        self,
-        X: Tensor,
-        head_index: Tensor,
-        rel_type: Tensor,
-        tail_index: Tensor,
-        all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio
-    ):
-
-        pos_score = self(X, head_index, rel_type, tail_index)
-        neg_score = self(X, *self.negative_sampling(head_index, rel_type, tail_index, all_triples, entity_count, head_corrupt_prob,negative_sampling_ratio))
-
-        scores = torch.cat([pos_score,neg_score])
-        labels = torch.cat([
-                torch.ones(pos_score.size()),
-                torch.zeros(neg_score.size())
-            ])
-        loss = F.binary_cross_entropy_with_logits(
-            input= scores,
-            target= labels)
-        auc_score = roc_auc_score(y_score=scores.detach().numpy(),y_true=labels.detach().numpy())
-        precision, recall, f1_score, _ = precision_recall_fscore_support(labels.detach().numpy(), (scores.detach().numpy() > 0).astype(int), average='binary')
-        scores = {
-            "auc": auc_score,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1_score
-        }
-
-
-        return loss, scores
 
     # def loader(
     #     self,
@@ -239,58 +206,6 @@ class KGEModel(torch.nn.Module):
 
         return head_index, rel_type, tail_index
     
-    @torch.no_grad()
-    def negative_sampling(
-        self, 
-        head_index, 
-        rel_type, 
-        tail_index, 
-        all_triples, 
-        entity_count,
-        head_corrupt_prob=0.5, 
-        negative_sampling_ratio=1
-    ):
-        # Step 1: Decide number of negatives per positive
-        batch_size = head_index.numel()
-        num_negatives = batch_size * negative_sampling_ratio
-
-        # Step 2: Repeat triples for negatives
-        head_pos = head_index.repeat(negative_sampling_ratio)
-        rel_pos = rel_type.repeat(negative_sampling_ratio)
-        tail_pos = tail_index.repeat(negative_sampling_ratio)
-
-        # Step 3: Randomly decide which to corrupt (head or tail)
-        # True = corrupt head, False = corrupt tail
-        corruption_mask = torch.rand(num_negatives, device=head_index.device) < head_corrupt_prob
-
-        # Step 4: Draw random entity replacements
-        random_entities = torch.randint(0, entity_count, (num_negatives,), device=head_index.device)
-
-        neg_heads = head_pos.clone()
-        neg_tails = tail_pos.clone()
-
-        # Apply corruption
-        neg_heads[corruption_mask] = random_entities[corruption_mask]
-        neg_tails[~corruption_mask] = random_entities[~corruption_mask]
-
-        # **Optional Step 5: Filter out any negatives that are actually positives**
-        # Build set of all true triples for fast lookup
-        # (for large graphs, skip or make approximate)
-        triple_set = set(tuple(triple.tolist()) for triple in all_triples)
-        negatives = []
-        for h, r, t in zip(neg_heads.tolist(), rel_pos.tolist(), neg_tails.tolist()):
-            if (h, r, t) not in triple_set:
-                negatives.append((h, r, t))
-
-        # Convert to tensor
-        if negatives:
-            negatives = torch.tensor(negatives, dtype=head_index.dtype, device=head_index.device).T
-            neg_heads, rel_neg, neg_tails = negatives[0], negatives[1], negatives[2]
-        else:
-            neg_heads, rel_neg, neg_tails = neg_heads, rel_pos, neg_tails
-
-        # Output as you need (stacked)
-        return neg_heads, rel_neg, neg_tails
 
 
     def __repr__(self) -> str:
