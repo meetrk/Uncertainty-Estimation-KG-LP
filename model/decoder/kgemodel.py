@@ -38,7 +38,7 @@ class KGEModel(torch.nn.Module):
             self.temperature = Parameter(torch.ones(1), requires_grad=False)
 
         elif self.calibration == "input_dependent":
-            self.use_input_dependent_temp = True  # Set to False for fixed temperature
+            self.use_input_dependent_temp = False 
             self.temp_network = torch.nn.Sequential(
                 torch.nn.Linear(2 * hidden_channels, hidden_channels // 2),
                 torch.nn.ReLU(),

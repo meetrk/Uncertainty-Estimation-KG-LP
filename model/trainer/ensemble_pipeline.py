@@ -8,7 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 from datetime import datetime
 from utils.utils import negative_sampling, dropout_edges
-from utils.evaluation import  compute_uncertainty,compute_mrr_emsemble
+from utils.evaluation import  compute_uncertainty,compute_mrr_ensemble
 import numpy as np
 
 
@@ -84,7 +84,7 @@ class EnsemblePipeline:
             
             # Evaluation
             if epoch % eval_frequency == 0:
-                valid_scores, test_scores = self.test_ensemble(test=False)
+                valid_scores, test_scores = self.test_ensemble()
                 
                 # Compute ensemble diversity
                 diversity = self.compute_diversity()
@@ -159,7 +159,7 @@ class EnsemblePipeline:
             
             # Compute loss
             out = torch.cat([pos_out, neg_out])
-            gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
+            gt = torch.cat([torch.ones_like(pos_out) - 0.1, torch.zeros_like(neg_out) + 0.05])
             
             cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
             reg_loss = z.pow(2).mean() + model.decoder.rel_emb.pow(2).mean()
@@ -180,7 +180,7 @@ class EnsemblePipeline:
 
         self.ensemble.eval()
         
-        scores = compute_mrr_emsemble(
+        scores = compute_mrr_ensemble(
             self.data.edge_index,
             self.data.edge_type,
             self.data.valid_edge_index,

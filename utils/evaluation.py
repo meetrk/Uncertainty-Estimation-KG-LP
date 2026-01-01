@@ -127,7 +127,7 @@ def compute_mrr( edge_index, edge_type, data, model):
     return scores
 
 @torch.no_grad()
-def compute_mrr_emsemble(train_edge_index, train_edge_type, edge_index, edge_type, data, models: DeepEnsemble):
+def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_type, data, models: DeepEnsemble):
     """
     Compute MRR for ensemble
     """
@@ -239,7 +239,6 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         predictions = []
         for model_idx in range(mc_samples):
             pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
-            pred = torch.sigmoid(pred)
             predictions.append(pred)
         
         out = torch.mean(torch.stack(predictions, dim=0), dim=0)
@@ -265,7 +264,6 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         predictions = []
         for model_idx in range(mc_samples):
             pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
-            pred = torch.sigmoid(pred)
             predictions.append(pred)
         
         out = torch.mean(torch.stack(predictions, dim=0), dim=0)

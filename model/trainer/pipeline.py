@@ -158,7 +158,9 @@ class Pipeline:
             self.data.edge_index,
             self.data.edge_type,
             self.data.valid_edge_index,
-            self.data.valid_edge_type)
+            self.data.valid_edge_type,
+            uncertainty_samples
+            )
 
         calibration_results = self.calibrate_pipeline(
             method=self.config.get_section('calibration')['method'],
@@ -181,80 +183,99 @@ class Pipeline:
             self.data.edge_index,
             self.data.edge_type,
             self.data.test_edge_index,
-            self.data.test_edge_type)
+            self.data.test_edge_type,
+            uncertainty_samples
+        )
 
         self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
         
-
-    @torch.no_grad()
-    def inference_mc(self, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples=10):
-
+    def _inference_mc_helper(self, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples=10, return_logits=False):
+        """Helper method for MC dropout inference without gradient control.
+        
+        Args:
+            return_logits: If True, return raw logits; if False, return sigmoid probabilities
+        """
         self.model.eval()
         if mc_samples > 1:
             self.model.encoder.mc_dropout = True  
 
-        neg_edge_index,neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes,1)
+        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 1)
       
         preds_list = []
 
         for _ in range(mc_samples):
-            print("Inference MC Samples:", mc_samples, self.model.encoder.mc_dropout)
             z = self.model.encode(edge_index, edge_type)
             pos_out = self.model.decode(z, test_edge_index, test_edge_type)
-            pos_out = torch.sigmoid(pos_out)
-
             neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
-            neg_out = torch.sigmoid(neg_out)
-
             out = torch.cat([pos_out, neg_out])
             preds_list.append(out)
 
         self.model.encoder.mc_dropout = False
-        labels = torch.cat([(torch.ones_like(pos_out)), (torch.zeros_like(neg_out))])
+        labels = torch.cat([
+            torch.ones_like(pos_out),
+            torch.zeros_like(neg_out)
+        ])
+        
         preds_stack = torch.stack(preds_list)
         preds_mean = preds_stack.mean(dim=0)
+        
+        if not return_logits:
+            preds_mean = torch.sigmoid(preds_mean)
+        
         return preds_mean, labels
 
     @torch.no_grad()
-    def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type):
+    def inference_mc(self, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples=10):
+        """MC dropout inference with gradients disabled."""
+        return self._inference_mc_helper(edge_index, edge_type, test_edge_index, test_edge_type, mc_samples, return_logits=False)
 
+    def _inference_helper(self, model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False):
+        """Helper method for standard inference without gradient control.
+        
+        Args:
+            return_logits: If True, return raw logits; if False, return sigmoid probabilities
+        """
         model.eval()
         z = model.encoder(edge_index, edge_type)
         pos_scores = model.decode(z, test_edge_index, test_edge_type)
-        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes,1)
+        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 1)
         neg_scores = model.decode(z, neg_edge_index, neg_edge_type)
         labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
         scores = torch.cat([pos_scores, neg_scores])
-        scores = torch.sigmoid(scores)
+        
+        if not return_logits:
+            scores = torch.sigmoid(scores)
 
         return scores, labels
 
     @torch.no_grad()
+    def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type):
+        """Standard inference with gradients disabled."""
+        return self._inference_helper(model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False)
+
+    @torch.no_grad()
     def test_link_pred(self, method, model, valid_edge_index, valid_edge_type,  mc_samples=10):
+
+        self.logger.info("Starting link prediction evaluation...")
+        self.logger.info(f"Evaluation method: {method}")
+
         model.eval()
         if method == 'standard':
-            
             scores = compute_mrr(valid_edge_index, valid_edge_type ,self.data, model)   
-            self.logger.info(f"MRR: {scores['mrr']:.4f}")
-            self.logger.info(f"Mean Rank: {scores['mean_rank']:.4f}")
-            self.logger.info(f"Hits@1: {scores['hits@1']:.4f}")
-            self.logger.info(f"Hits@3: {scores['hits@3']:.4f}")
-            self.logger.info(f"Hits@10: {scores['hits@10']:.4f}")
 
         elif method == 'mc_dropout':
-            
             scores = compute_mrr_mc_dropout(self.data.edge_index, self.data.edge_type,
                                 valid_edge_index, valid_edge_type,
                                 self.data, model, mc_samples=mc_samples)
-            
-            self.logger.info(f"MRR = {scores['mrr']:.4f}")
-            self.logger.info(f"Mean Rank = {scores['mean_rank']:.4f}")
-            self.logger.info(f"Hits@1 = {scores['hits@1']:.4f}")
-            self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
-            self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
 
         else:
             raise ValueError(f"Unsupported evaluation method: {method}")
+        
+        self.logger.info(f"MRR = {scores['mrr']:.4f}")
+        self.logger.info(f"Mean Rank = {scores['mean_rank']:.4f}")
+        self.logger.info(f"Hits@1 = {scores['hits@1']:.4f}")
+        self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
+        self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
         
         return scores
 
@@ -264,6 +285,10 @@ class Pipeline:
         """
 
         self.model.train()
+        # Ensure input-dependent temperature is disabled during training
+        if hasattr(self.model.decoder, 'use_input_dependent_temp'):
+            self.model.decoder.use_input_dependent_temp = False
+        
         self.optimizer.zero_grad()
 
         # dropout some edge randomly for training
@@ -280,7 +305,8 @@ class Pipeline:
         neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
 
         out = torch.cat([pos_out, neg_out])
-        gt = torch.cat([torch.ones_like(pos_out) - 0.1, torch.zeros_like(neg_out) + 0.05])
+        
+        gt = torch.cat([torch.full_like(pos_out, self.train_config['label_smoothing']['positive']), torch.full_like(neg_out, self.train_config['label_smoothing']['negative'])])
         
         cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
         reg_loss = z.pow(2).mean() + self.model.decoder.rel_emb.pow(2).mean()
@@ -306,7 +332,7 @@ class Pipeline:
         return valid_scores, None
 
     @torch.no_grad()
-    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type):
+    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples):
 
         if method == 'mc_dropout':
             scores, labels = self.inference_mc(
@@ -314,7 +340,8 @@ class Pipeline:
                 edge_type,
                 test_edge_index,
                 test_edge_type,
-                mc_samples=self.config.get_section('calibration').get('mc_samples',10))
+                mc_samples=uncertainty_samples
+            )
             val_scores = compute_uncertainty(labels,scores)
         elif method == 'standard':
             scores, labels = self.inference(model, edge_index, edge_type, test_edge_index, test_edge_type)
@@ -335,11 +362,15 @@ class Pipeline:
         """Main entry point for calibration."""
 
         self.logger.info("Starting calibration process...")
-        
+        type_params = {
+            'type': self.config.get_section('calibration').get('type', 'standard'),
+            'mc_samples': self.config.get_section('calibration').get('mc_samples', 10)
+        }
+        self.logger.info(f"Uncertainty model type: {type_params}")
         if method == 'scalar':
-            return self.calibrate_scalar_temperature(model, max_iters, lr)
-        elif method == 'input_scaling':
-            return self.calibrate_input_dependent_temperature(model, max_iters, lr)
+            return self.calibrate_scalar_temperature(model, max_iters, lr, type_params)
+        elif method == 'input_dependent':
+            return self.calibrate_input_dependent_temperature(model, max_iters, lr, type_params)
         else:
             raise ValueError(f"Unsupported calibration method: {method}")
     
@@ -399,44 +430,46 @@ class Pipeline:
         
         return trainable_params
 
-    def compute_nll_loss(self,model):
+    def compute_nll_loss(self, model, params):
         """
         Compute Negative Log-Likelihood loss for calibration.
         
         Args:
             model: The GAE model
-            data: Graph data
-            edge_index: Edge indices to evaluate
-            edge_type: Edge types
+            params: Parameters dict with 'type' and 'mc_samples'
             
         Returns:
             NLL loss value
         """
-        model.eval()
-        with torch.no_grad():
-            z = model.encode(self.data.edge_index, self.data.edge_type)
+        # For calibration, we need gradients to flow through temperature
+        # Call helper methods without @torch.no_grad() decorator to enable gradients
         
-        # Get positive logits (temperature is applied inside decoder)
-        pos_logits = model.decode(z, self.data.valid_edge_index, self.data.valid_edge_type)
-        
-        # Sample negative edges for balanced calibration
-        neg_edge_index, neg_edge_type = negative_sampling(
-            self.data.valid_edge_index, 
-            self.data.valid_edge_type, 
-            self.data.num_nodes, 
-            1  
-        )
-        neg_logits = model.decode(z, neg_edge_index, neg_edge_type)
-        
-        # Concatenate positive and negative samples
-        logits = torch.cat([pos_logits, neg_logits])
-        labels = torch.cat([torch.ones_like(pos_logits), torch.zeros_like(neg_logits)])
+        if params['type'] == 'mc_dropout':
+            logits, labels = self._inference_mc_helper(
+                self.data.edge_index,
+                self.data.edge_type,
+                self.data.valid_edge_index,
+                self.data.valid_edge_type,
+                mc_samples=params['mc_samples'],
+                return_logits=True  # Return raw logits for loss computation
+            )
+        elif params['type'] == 'standard':
+            logits, labels = self._inference_helper(
+                model,
+                self.data.edge_index,
+                self.data.edge_type,
+                self.data.valid_edge_index,
+                self.data.valid_edge_type,
+                return_logits=True  # Return raw logits for loss computation
+            )
+        else:
+            raise ValueError(f"Unsupported evaluation method: {params['type']}")
         
         nll_loss = F.binary_cross_entropy_with_logits(logits, labels)
         
         return nll_loss
 
-    def calibrate_input_dependent_temperature(self, model, max_iters=50, lr=0.01):
+    def calibrate_input_dependent_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
         """Calibrate input-dependent temperature network on validation set.
         
         This method learns a small neural network that predicts per-query
@@ -455,8 +488,21 @@ class Pipeline:
 
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
 
-      
-
+        stats = self._get_temperature_stats(
+                    model, 
+                    self.data.valid_edge_index, 
+                    self.data.valid_edge_type, 
+                    num_samples=100
+                )
+        self._log_temperature_stats(stats, prefix="  Sample ")
+        
+        # Enable input-dependent temperature for this calibration method
+        if hasattr(model.decoder, 'use_input_dependent_temp'):
+            model.decoder.use_input_dependent_temp = True
+        else:
+            self.logger.error("Model decoder does not support input-dependent temperature!")
+            return {}
+        
         # Freeze all parameters except temperature network
         temp_params = self._freeze_non_temperature_params(
             model, 
@@ -473,6 +519,7 @@ class Pipeline:
         self.logger.info(f"Parameters to optimize: {len(temp_params)}")
         self.logger.info(f"Max iterations: {max_iters}, Learning rate: {lr}")
         self.logger.info("="*60)
+
         
         # Training loop with early stopping
         best_loss = float('inf')
@@ -481,7 +528,7 @@ class Pipeline:
         for iteration in range(1, max_iters + 1):
             # Optimization step
             optimizer.zero_grad()
-            loss = self.compute_nll_loss(model)
+            loss = self.compute_nll_loss(model, params=type_params)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(temp_params, max_norm=1.0)
             optimizer.step()
@@ -532,7 +579,7 @@ class Pipeline:
         
         return final_stats
 
-    def calibrate_scalar_temperature(self, model, max_iters=50, lr=0.01):
+    def calibrate_scalar_temperature(self, model, max_iters=50, lr=0.01, type_params = None):
         """Calibrate single scalar temperature parameter on validation set.
         
         This is the traditional temperature scaling approach where a single
@@ -547,6 +594,10 @@ class Pipeline:
             float: Calibrated temperature value
         """
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
+        
+        # Ensure input-dependent temperature is disabled for scalar calibration
+        if hasattr(model.decoder, 'use_input_dependent_temp'):
+            model.decoder.use_input_dependent_temp = False
 
         # Freeze all parameters except temperature
         temp_params = self._freeze_non_temperature_params(
@@ -569,7 +620,7 @@ class Pipeline:
         
         def eval_closure():
             optimizer.zero_grad()
-            loss = self.compute_nll_loss(model)
+            loss = self.compute_nll_loss(model, params=type_params)
             loss.backward()
             return loss
         
@@ -596,7 +647,6 @@ class Pipeline:
             param.requires_grad = True
         
         return final_temp
-
 
     def log_model_gradients(self, epoch):
         """Log gradient norms to TensorBoard for monitoring."""
@@ -633,7 +683,6 @@ class Pipeline:
             if isinstance(value, (int, float)):
                 self.writer.add_scalar(f'Hyperparameters/{key}', value, 0)
 
-
     def save_checkpoint(self, epoch, name = None):
         """Save model checkpoint."""
         checkpoint = {
@@ -668,4 +717,3 @@ class Pipeline:
         """Cleanup TensorBoard writer when pipeline is destroyed."""
         if hasattr(self, 'writer'):
             self.writer.close()
-

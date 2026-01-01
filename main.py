@@ -95,13 +95,14 @@ def main():
     else:
         raise ValueError("Unsupported decoder type specified")
 
+    logger.info("Decoder calibration method: {}".format(calibration_config['method']))
+
     decoder = decoder(
         num_nodes=data.num_nodes,
         num_relations=dataset.num_relations // 2,
         hidden_channels=config_loader.get_section('model')['encoder']['embedding_dim'],
         calibration = calibration_config['method'],
     )
-    logger.info("Decoder calibration method: {}".format(calibration_config['method']))
     logger.info(f"Decoder initialized: {decoder}")
     logger.info(f"Decoder parameters count: {sum(p.numel() for p in decoder.parameters())}")
 
@@ -127,7 +128,7 @@ def main():
     train_config = config_loader.get_section('training')
     if train_config['load_model']:
         logger.info("Starting uncertainty evaluation on test set...")
-        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'],calibration_config['type'],train_config['mc_samples'])
+        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'],calibration_config['type'],calibration_config['mc_samples'])
         return
     else:
         # Start training

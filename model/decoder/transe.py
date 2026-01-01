@@ -48,11 +48,13 @@ class TransE(KGEModel):
         margin: float = 1.0,
         p_norm: float = 1.0,
         sparse: bool = False,
+        calibration: str = "none",
     ):
-        super().__init__(num_nodes, num_relations, hidden_channels, sparse)
+        super().__init__(num_nodes, num_relations, hidden_channels, sparse, calibration)
 
         self.p_norm = p_norm
         self.margin = margin
+
 
         self.reset_parameters()
 
