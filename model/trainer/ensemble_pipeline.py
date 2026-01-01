@@ -4,15 +4,14 @@ Training pipeline for Deep Ensemble uncertainty estimation.
 import torch
 from pathlib import Path
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
-from datetime import datetime
 from utils.utils import negative_sampling, dropout_edges
-from utils.evaluation import  compute_uncertainty,compute_mrr_ensemble
+from utils.evaluation import compute_uncertainty, compute_mrr_ensemble
+from model.trainer.base_pipeline import BasePipeline
 import numpy as np
 
 
-class EnsemblePipeline:
+class EnsemblePipeline(BasePipeline):
     """
     Training pipeline for Deep Ensemble models.
     
@@ -21,17 +20,12 @@ class EnsemblePipeline:
     """
     
     def __init__(self, ensemble_model, data, config, logger):
-        self.ensemble = ensemble_model
-        self.data = data
-        self.config = config
-        self.logger = logger
-        self.model_config = self.config.get_section('model')
-        self.train_config = self.config.get_section('training')
-        self.ensemble_config = self.config.get_section('ensemble')
+        # Call parent constructor
+        super().__init__(ensemble_model, data, config, logger)
         
-        self.learning_rate = self.train_config['optimiser']['learning_rate']
-        self.weight_decay = self.train_config['optimiser']['weight_decay']
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Store reference to ensemble (model is already stored in parent)
+        self.ensemble = self.model
+        self.ensemble_config = self.config.get_section('ensemble')
         
         # Create separate optimizer for each ensemble member
         self.optimizers = self.ensemble.get_optimizers(
@@ -39,21 +33,18 @@ class EnsemblePipeline:
             weight_decay=self.weight_decay
         )
         
-        # TensorBoard setup
-        log_dir = Path('runs') / f"ensemble_experiment_{self.config.get_section('dataset')}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        self.writer = SummaryWriter(log_dir=str(log_dir))
-        self.logger.info(f"TensorBoard logs will be saved to: {log_dir}")
-        
-        # Training state
-        self.epoch = 0
-        self.training_history = {
-            'train_loss': [],
-            'val_loss': [],
-            'eval_metrics': [],
-            'ensemble_diversity': []
-        }
-        
-        self.log_hyperparameters()
+        # Add ensemble-specific training history
+        self.training_history['ensemble_diversity'] = []
+    
+    def _get_experiment_name(self):
+        """Get experiment name for TensorBoard logs."""
+        return f"ensemble_experiment_{self.config.get_section('dataset')}"
+    
+    def _get_hyperparameters(self):
+        """Get hyperparameters including ensemble-specific ones."""
+        hparams = super()._get_hyperparameters()
+        hparams['num_ensemble_models'] = self.ensemble.num_models
+        return hparams
     
     def start_pipeline(self):
         """Start the ensemble training pipeline."""
@@ -77,10 +68,8 @@ class EnsemblePipeline:
             for i, loss in enumerate(ensemble_losses):
                 self.writer.add_scalar(f'Loss/Model_{i}', loss, epoch)
             
-            self.writer.add_scalar('Loss/Ensemble_Mean', avg_loss, epoch)
-            
-            self.logger.info(f'Epoch: {epoch:05d}, Avg Ensemble Loss: {avg_loss:.4f}')
-            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": avg_loss})
+            # Use parent class method for logging
+            self.log_training_metrics(epoch, avg_loss)
             
             # Evaluation
             if epoch % eval_frequency == 0:
@@ -96,12 +85,9 @@ class EnsemblePipeline:
                 
                 current_val_mrr = valid_scores['mrr']
                 
-                # Log metrics
-                self.logger.info(f"Epoch {epoch}: Val MRR = {valid_scores['mrr']:.4f}")
-                self.logger.info(f"Epoch {epoch}: Ensemble Diversity = {diversity:.4f}")
-                
-                self.writer.add_scalar('MRR/Validation', valid_scores['mrr'], epoch)
-                self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
+                # Log metrics using parent class method
+                self.log_evaluation_metrics(epoch, valid_scores, test_scores)
+                self.logger.info(f"Ensemble Diversity = {diversity:.4f}")
                 
                 # Check for improvement
                 if current_val_mrr - best_val_mrr > delta:
@@ -117,16 +103,15 @@ class EnsemblePipeline:
                 if early_stopping and patience_counter >= patience:
                     self.logger.info("Early stopping triggered.")
                     break
-                
-                self.training_history['eval_metrics'].append({
-                    "epoch": epoch,
-                    "val_mrr": valid_scores["mrr"],
-                    "val_hits@10": valid_scores["hits@10"],
-                })
         
         self.writer.close()
         self.logger.info("Ensemble training completed!")
         return self.training_history
+    
+    def train(self):
+        """Train all ensemble members for one epoch. Wrapper for train_ensemble."""
+        sum_loss = sum(self.train_ensemble())
+        return sum_loss
     
     def train_ensemble(self):
         """Train all ensemble members for one epoch."""
@@ -159,7 +144,7 @@ class EnsemblePipeline:
             
             # Compute loss
             out = torch.cat([pos_out, neg_out])
-            gt = torch.cat([torch.ones_like(pos_out) - 0.1, torch.zeros_like(neg_out) + 0.05])
+            gt = torch.cat([torch.full_like(pos_out, self.train_config['label_smoothing']['positive']), torch.full_like(neg_out, self.train_config['label_smoothing']['negative'])])
             
             cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
             reg_loss = z.pow(2).mean() + model.decoder.rel_emb.pow(2).mean()
@@ -173,6 +158,10 @@ class EnsemblePipeline:
             ensemble_losses.append(float(loss))
         
         return ensemble_losses
+    
+    def test(self):
+        """Test ensemble. Wrapper for test_ensemble."""
+        return self.test_ensemble()
     
     @torch.no_grad()
     def test_ensemble(self):
@@ -239,8 +228,8 @@ class EnsemblePipeline:
         scores['std_epistemic_uncertainty'] = all_std_pred.std().item()
 
         
-        self.logger.info(f"Ensemble Uncertainty - Brier Score: {scores['brier_score']:.4f}")
-        self.logger.info(f"Ensemble Uncertainty - ECE: {scores['ece']:.4f}")
+        self.logger.info(f"Brier Score: {scores['brier_score']:.4f}")
+        self.logger.info(f"ECE: {scores['ece']:.4f}")
         self.logger.info(f"Mean Epistemic Uncertainty: {scores['mean_epistemic_uncertainty']:.4f}")
         self.logger.info(f"Probability True: {np.asarray(scores['prob_true'])}")
         self.logger.info(f"Probability Predicted: {np.asarray(scores['prob_pred'])}")
@@ -292,14 +281,9 @@ class EnsemblePipeline:
         
         return diversity
     
-    def save_checkpoint(self, epoch):
-        """Save ensemble checkpoint."""
-        checkpoint_dir = Path('checkpoints')
-        checkpoint_dir.mkdir(exist_ok=True)
-        
-        checkpoint_path = checkpoint_dir / f'{self.config.get_section("dataset")["name"]}_ensemble_checkpoint_epoch_{epoch}.pth'
-        
-        checkpoint = {
+    def _build_checkpoint(self, epoch):
+        """Build ensemble checkpoint dictionary."""
+        return {
             'epoch': epoch,
             'num_models': self.ensemble.num_models,
             'encoder_args': self.ensemble.encoder_args,
@@ -309,14 +293,9 @@ class EnsemblePipeline:
             'training_history': self.training_history,
             'config': self.config
         }
-        
-        torch.save(checkpoint, checkpoint_path)
-        self.logger.info(f"Ensemble checkpoint saved to {checkpoint_path}")
     
-    def load_checkpoint(self, checkpoint_path):
-        """Load ensemble checkpoint."""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        
+    def _restore_from_checkpoint(self, checkpoint):
+        """Restore ensemble state from checkpoint."""
         for i, state_dict in enumerate(checkpoint['models']):
             self.ensemble.models[i].load_state_dict(state_dict)
         
@@ -326,25 +305,4 @@ class EnsemblePipeline:
         self.training_history = checkpoint.get('training_history', {
             'train_loss': [], 'eval_metrics': [], 'ensemble_diversity': []
         })
-        self.epoch = checkpoint['epoch']
-        
-        self.logger.info(f"Ensemble checkpoint loaded from {checkpoint_path}")
-    
-    def log_hyperparameters(self):
-        """Log hyperparameters to TensorBoard."""
-        hparams = {
-            'num_ensemble_models': self.ensemble.num_models,
-            'learning_rate': self.learning_rate,
-            'weight_decay': self.weight_decay,
-            'epochs': self.train_config['epochs'],
-            'embedding_dim': self.model_config['encoder']['embedding_dim'],
-            'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
-        }
-        
-        hparam_text = "\n".join([f"{key}: {value}" for key, value in hparams.items()])
-        self.writer.add_text('Hyperparameters', hparam_text, 0)
-    
-    def __del__(self):
-        """Cleanup TensorBoard writer."""
-        if hasattr(self, 'writer'):
-            self.writer.close()
+

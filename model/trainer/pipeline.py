@@ -1,49 +1,34 @@
 import torch
 from pathlib import Path
-import torch
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
-from datetime import datetime
 from utils.utils import negative_sampling
-from utils.evaluation import compute_mrr,compute_uncertainty,compute_mrr_mc_dropout
+from utils.evaluation import compute_mrr, compute_uncertainty, compute_mrr_mc_dropout
 from utils.utils import dropout_edges
+from model.trainer.base_pipeline import BasePipeline
 
-class Pipeline:
+
+class Pipeline(BasePipeline):
+    """Pipeline for training single model with MC Dropout and temperature calibration."""
 
     def __init__(self, model, data, config, logger):
-        self.model = model
-        self.data = data
-        self.config = config
-        self.logger = logger
-        self.model_config = self.config.get_section('model')
-        self.train_config = self.config.get_section('training')
-        self.learning_rate = self.train_config['optimiser']['learning_rate']
-        self.weight_decay = self.train_config['optimiser']['weight_decay']
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-
+        # Call parent constructor
+        super().__init__(model, data, config, logger)
+        
+        # Pipeline-specific initialization
         self.optimizer = torch.optim.Adam(
             model.parameters(), 
             lr=self.learning_rate,
         )
         self.all_triples = torch.stack([
-                    self.data.edge_index[0],
-                    self.data.edge_type,
-                    self.data.edge_index[1]
-                ], dim=1)
-        
-        # Initialize TensorBoard writer
-        log_dir = Path('runs') / f"experiment_{self.config.get_section('dataset')}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        self.writer = SummaryWriter(log_dir=str(log_dir))
-        self.logger.info(f"TensorBoard logs will be saved to: {log_dir}")
-        
-        # Log hyperparameters
-        self.log_hyperparameters()
-        
-        # Training state
-        self.epoch = 0
-        self.training_history = {'train_loss': [], 'val_loss': [], 'eval_metrics': []}
+            self.data.edge_index[0],
+            self.data.edge_type,
+            self.data.edge_index[1]
+        ], dim=1)
+    
+    def _get_experiment_name(self):
+        """Get experiment name for TensorBoard logs."""
+        return f"experiment_{self.config.get_section('dataset')}"
 
     def start_pipeline(self):
         max_epochs = self.train_config['epochs']
@@ -61,14 +46,11 @@ class Pipeline:
         for epoch in tqdm_range:
            
             loss = self.train()
-            # val_loss = self.validate()
             val_loss = 0
             print(f'Epoch: {epoch:05d}, Loss: {loss:.4f}, Val Loss: {val_loss:.4f}')
-            self.writer.add_scalar('Loss/Train', loss, epoch)
-            self.writer.add_scalar('Loss/Validation', val_loss, epoch)
-
-            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": loss})
-            self.training_history['val_loss'].append({"epoch": epoch, "epoch_loss": val_loss})
+            
+            # Use parent class method for logging
+            self.log_training_metrics(epoch, loss, val_loss)
 
             # Log gradients periodically
             if epoch % 10 == 0:  # Log gradients every 10 epochs
@@ -98,43 +80,10 @@ class Pipeline:
                     self.logger.info("Early stopping triggered.")
                     break
 
-                if test_scores is None:
-                    test_scores = {"mrr": 0, "mean_rank": 0, "hits@1": 0, "hits@3": 0, "hits@10": 0}
-
-
-                self.training_history['eval_metrics'].append({
-                    "epoch": epoch,
-                    "val_mrr": valid_scores["mrr"],
-                    "val_mean_rank": valid_scores["mean_rank"],
-                    "val_hits@1": valid_scores["hits@1"],
-                    "val_hits@3": valid_scores["hits@3"],
-                    "val_hits@10": valid_scores["hits@10"],
-                    "test_mrr": test_scores["mrr"],
-                    "test_mean_rank": test_scores["mean_rank"],
-                    "test_hits@1": test_scores["hits@1"],  
-                    "test_hits@3": test_scores["hits@3"],
-                    "test_hits@10": test_scores["hits@10"],
-                })
-                self.logger.info(f"Epoch {epoch}: Val MRR = {valid_scores['mrr']:.4f}, Test MRR = {test_scores['mrr']:.4f}")
-                self.logger.info(f"Epoch {epoch}: Val Mean Rank = {valid_scores['mean_rank']:.4f}, Test Mean Rank = {test_scores['mean_rank']:.4f}")
-                self.logger.info(f"Epoch {epoch}: Val Hits@1 = {valid_scores['hits@1']:.4f}, Test Hits@1 = {test_scores['hits@1']:.4f}")
-                self.logger.info(f"Epoch {epoch}: Val Hits@3 = {valid_scores['hits@3']:.4f}, Test Hits@3 = {test_scores['hits@3']:.4f}")
-                self.logger.info(f"Epoch {epoch}: Val Hits@10 = {valid_scores['hits@10']:.4f}, Test Hits@10 = {test_scores['hits@10']:.4f}")
-
-                # Log evaluation metrics to TensorBoard
-                self.writer.add_scalar('MRR/Validation', valid_scores['mrr'], epoch)
-                self.writer.add_scalar('MRR/Test', test_scores['mrr'], epoch)
-                self.writer.add_scalar('Mean_Rank/Validation', valid_scores['mean_rank'], epoch)
-                self.writer.add_scalar('Mean_Rank/Test', test_scores['mean_rank'], epoch)
-                self.writer.add_scalar('Hits@1/Validation', valid_scores['hits@1'], epoch)
-                self.writer.add_scalar('Hits@1/Test', test_scores['hits@1'], epoch)
-                self.writer.add_scalar('Hits@3/Validation', valid_scores['hits@3'], epoch)
-                self.writer.add_scalar('Hits@3/Test', test_scores['hits@3'], epoch)
-                self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
-                self.writer.add_scalar('Hits@10/Test', test_scores['hits@10'], epoch)
+                # Use parent class method for logging evaluation metrics
+                self.log_evaluation_metrics(epoch, valid_scores, test_scores)
 
         
-        # Close TensorBoard writer
         self.writer.close()
         self.logger.info("Training completed!")
         return self.training_history
@@ -188,7 +137,7 @@ class Pipeline:
         )
 
         self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
-        
+
     def _inference_mc_helper(self, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples=10, return_logits=False):
         """Helper method for MC dropout inference without gradient control.
         
@@ -202,6 +151,8 @@ class Pipeline:
         neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 1)
       
         preds_list = []
+        pos_out = None
+        neg_out = None
 
         for _ in range(mc_samples):
             z = self.model.encode(edge_index, edge_type)
@@ -211,6 +162,9 @@ class Pipeline:
             preds_list.append(out)
 
         self.model.encoder.mc_dropout = False
+        
+        # pos_out and neg_out are guaranteed to be set after the loop
+        assert pos_out is not None and neg_out is not None
         labels = torch.cat([
             torch.ones_like(pos_out),
             torch.zeros_like(neg_out)
@@ -349,10 +303,10 @@ class Pipeline:
         else:
             raise ValueError(f"Unsupported uncertainty estimation method: {method}")
 
-        self.logger.info(f"Brier_score: {val_scores['brier_score']}")
+        self.logger.info(f"Brier Score: {val_scores['brier_score']}")
         self.logger.info(f"ECE: {val_scores['ece']}")
-        self.logger.info(f"Prob_true: {val_scores['prob_true']}")
-        self.logger.info(f"Prob_pred: {val_scores['prob_pred']}")
+        self.logger.info(f"Probability True: {val_scores['prob_true']}")
+        self.logger.info(f"Probability Predicted: {val_scores['prob_pred']}")
 
         self.logger.info(f" {val_scores}")
 
@@ -648,72 +602,18 @@ class Pipeline:
         
         return final_temp
 
-    def log_model_gradients(self, epoch):
-        """Log gradient norms to TensorBoard for monitoring."""
-        total_norm = 0
-        for name, param in self.model.named_parameters():
-            if param.grad is not None:
-                param_norm = param.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-                # Log individual parameter gradients
-                self.writer.add_scalar(f'Gradients/{name}', param_norm, epoch)
-        
-        total_norm = total_norm ** (1. / 2)
-        self.writer.add_scalar('Gradients/Total_Norm', total_norm, epoch)
-
-    def log_hyperparameters(self):
-        """Log hyperparameters to TensorBoard."""
-        hparams = {
-            'learning_rate': self.learning_rate,
-            'weight_decay': self.weight_decay,
-            'epochs': self.train_config['epochs'],
-            'negative_sampling_ratio': self.train_config['sampling']['negative_sampling_ratio'],
-            'embedding_dim': self.model_config['encoder']['embedding_dim'],
-            'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
-            'num_bases': self.model_config['encoder']['num_bases'],
-            # 'sampling_method': self.train_config['sampling']['method']
-        }
-        
-        # Add text summary of hyperparameters
-        hparam_text = "\n".join([f"{key}: {value}" for key, value in hparams.items()])
-        self.writer.add_text('Hyperparameters', hparam_text, 0)
-        
-        # Log as scalars for easy comparison
-        for key, value in hparams.items():
-            if isinstance(value, (int, float)):
-                self.writer.add_scalar(f'Hyperparameters/{key}', value, 0)
-
-    def save_checkpoint(self, epoch, name = None):
-        """Save model checkpoint."""
-        checkpoint = {
+    def _build_checkpoint(self, epoch):
+        """Build checkpoint dictionary."""
+        return {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'training_history': self.training_history,
             'config': self.config
         }
-        if name is None:
-            name = f'{self.config.get_section("dataset")["name"]}_checkpoint_epoch_{epoch}.pth'
-        checkpoint_dir = Path('checkpoints')
-        checkpoint_dir.mkdir(exist_ok=True)
-
-        checkpoint_path = checkpoint_dir / name
-        torch.save(checkpoint, checkpoint_path)
-        
-        self.logger.info(f"Checkpoint saved to {checkpoint_path}")
     
-    def load_checkpoint(self, checkpoint_path):
-        """Load model checkpoint."""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
-        
-        self.model.load_state_dict(checkpoint['model_state_dict'],strict=False)
+    def _restore_from_checkpoint(self, checkpoint):
+        """Restore model state from checkpoint."""
+        self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.training_history = checkpoint.get('training_history', {'train_loss': [], 'eval_metrics': []})
-        self.epoch = checkpoint['epoch']
-        
-        self.logger.info(f"Checkpoint loaded from {checkpoint_path}")
-        
-    def __del__(self):
-        """Cleanup TensorBoard writer when pipeline is destroyed."""
-        if hasattr(self, 'writer'):
-            self.writer.close()
