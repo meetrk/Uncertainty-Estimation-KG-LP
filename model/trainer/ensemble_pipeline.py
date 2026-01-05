@@ -72,13 +72,13 @@ class EnsemblePipeline(BasePipeline):
                 self.logger.info(f"Epoch {epoch}: Val Hits@3 = {valid_scores['hits@3']:.4f}")
                 self.logger.info(f"Epoch {epoch}: Val Hits@10 = {valid_scores['hits@10']:.4f}")
 
-                
-                # Check for improvement
-                if current_val_mrr - best_val_mrr > delta:
-                    best_val_mrr = current_val_mrr
-                    patience_counter = 0
-                    self.logger.info(f"New best ensemble! MRR: {best_val_mrr:.4f}")
-                    scores = self.test_uncertainty(
+                self.writer.add_scalar('MRR/Validation', valid_scores['mrr'], epoch)
+                self.writer.add_scalar('Mean_Rank/Validation', valid_scores['mean_rank'], epoch)
+                self.writer.add_scalar('Hits@1/Validation', valid_scores['hits@1'], epoch)
+                self.writer.add_scalar('Hits@3/Validation', valid_scores['hits@3'], epoch)
+                self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
+
+                scores = self.test_uncertainty(
                         self.model,
                         self.config.get_section('calibration')['method'],
                         self.data.edge_index,
@@ -86,6 +86,17 @@ class EnsemblePipeline(BasePipeline):
                         self.data.valid_edge_index,
                         self.data.valid_edge_type,
                     )
+
+                self.writer.add_scalar('MC_Uncertainty/Brier_Score', scores['brier_score'], epoch)
+                self.writer.add_scalar('MC_Uncertainty/ECE', scores['ece'], epoch)
+
+                
+                # Check for improvement
+                if current_val_mrr - best_val_mrr > delta:
+                    best_val_mrr = current_val_mrr
+                    patience_counter = 0
+                    self.logger.info(f"New best ensemble! MRR: {best_val_mrr:.4f}")
+                    
                     if self.train_config['save_model']:
                         self.save_checkpoint(epoch) 
                 else:
@@ -100,7 +111,13 @@ class EnsemblePipeline(BasePipeline):
                 self.training_history['eval_metrics'].append({
                     "epoch": epoch,
                     "val_mrr": valid_scores["mrr"],
+                    "val_mean_rank": valid_scores["mean_rank"],
+                    "val_hits@1": valid_scores["hits@1"],
+                    "val_hits@3": valid_scores["hits@3"],
                     "val_hits@10": valid_scores["hits@10"],
+                    "brier_score": scores['brier_score'],
+                    "ece": scores['ece']
+
                 })
         
         self.writer.close()
@@ -281,6 +298,8 @@ class EnsemblePipeline(BasePipeline):
             self.data.test_edge_index,
             self.data.test_edge_type,
             )
+        if save:
+            self.save_checkpoint(epoch=0, name=f'calibrated_{Path(checkpoint_path).name}')
 
         return scores
 
@@ -320,7 +339,7 @@ class EnsemblePipeline(BasePipeline):
         checkpoint_dir.mkdir(exist_ok=True)
         
         if name is None:
-            name = f'{self.config.get_section("dataset")["name"]}_checkpoint_epoch_{epoch}.pth'
+            name = f'{self.config.get_section("dataset")["name"]}_ensemble_checkpoint_epoch_{epoch}.pth'
            
 
         checkpoint_path = checkpoint_dir / name
