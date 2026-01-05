@@ -203,3 +203,4 @@ class BasePipeline:
         """Cleanup TensorBoard writer when pipeline is destroyed."""
         if hasattr(self, 'writer'):
             self.writer.close()
+

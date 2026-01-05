@@ -7,7 +7,7 @@ from model.trainer.basepipeline import BasePipeline
 from utils.utils import negative_sampling
 from utils.evaluation import compute_mrr, compute_uncertainty, compute_mrr_mc_dropout
 from utils.utils import dropout_edges
-from model.trainer.base_pipeline import BasePipeline
+from model.trainer.basepipeline import BasePipeline
 
 
 class Pipeline(BasePipeline):
@@ -35,9 +35,11 @@ class Pipeline(BasePipeline):
             loss = self.train()
             val_loss = 0
             print(f'Epoch: {epoch:05d}, Loss: {loss:.4f}, Val Loss: {val_loss:.4f}')
-            
-            # Use parent class method for logging
-            self.log_training_metrics(epoch, loss, val_loss)
+            self.writer.add_scalar('Loss/Train', loss, epoch)
+            self.writer.add_scalar('Loss/Validation', val_loss, epoch)
+
+            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": loss})
+            self.training_history['val_loss'].append({"epoch": epoch, "epoch_loss": val_loss})
 
             # Log gradients periodically
             if epoch % 10 == 0:  # Log gradients every 10 epochs
@@ -579,3 +581,4 @@ class Pipeline(BasePipeline):
             param.requires_grad = True
         
         return final_temp
+

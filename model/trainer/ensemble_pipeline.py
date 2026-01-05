@@ -2,10 +2,11 @@ import torch
 from pathlib import Path
 from model.trainer.basepipeline import BasePipeline
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
+from datetime import datetime
 from utils.utils import negative_sampling, dropout_edges
-from utils.evaluation import compute_uncertainty, compute_mrr_ensemble
-from model.trainer.base_pipeline import BasePipeline
+from utils.evaluation import  compute_uncertainty,compute_mrr_ensemble
 import numpy as np
 
 
@@ -44,8 +45,10 @@ class EnsemblePipeline(BasePipeline):
             for i, loss in enumerate(ensemble_losses):
                 self.writer.add_scalar(f'Loss/Model_{i}', loss, epoch)
             
-            # Use parent class method for logging
-            self.log_training_metrics(epoch, avg_loss)
+            self.writer.add_scalar('Loss/Ensemble_Mean', avg_loss, epoch)
+            
+            self.logger.info(f'Epoch: {epoch:05d}, Avg Ensemble Loss: {avg_loss:.4f}')
+            self.training_history['train_loss'].append({"epoch": epoch, "epoch_loss": avg_loss})
             
             # Evaluation
             if epoch % eval_frequency == 0:
@@ -121,11 +124,6 @@ class EnsemblePipeline(BasePipeline):
         self.logger.info("Ensemble training completed!")
         return self.training_history
     
-    def train(self):
-        """Train all ensemble members for one epoch. Wrapper for train_ensemble."""
-        sum_loss = sum(self.train_ensemble())
-        return sum_loss
-    
     def train_ensemble(self):
         """Train all ensemble members for one epoch."""
         ensemble_losses = []
@@ -157,7 +155,7 @@ class EnsemblePipeline(BasePipeline):
             
             # Compute loss
             out = torch.cat([pos_out, neg_out])
-            gt = torch.cat([torch.full_like(pos_out, self.train_config['label_smoothing']['positive']), torch.full_like(neg_out, self.train_config['label_smoothing']['negative'])])
+            gt = torch.cat([torch.ones_like(pos_out) - 0.1, torch.zeros_like(neg_out) + 0.05])
             
             cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
             reg_loss = z.pow(2).mean() + model.decoder.rel_emb.pow(2).mean()
@@ -171,10 +169,6 @@ class EnsemblePipeline(BasePipeline):
             ensemble_losses.append(float(loss))
         
         return ensemble_losses
-    
-    def test(self):
-        """Test ensemble. Wrapper for test_ensemble."""
-        return self.test_ensemble()
     
     @torch.no_grad()
     def test_ensemble(self):
@@ -360,9 +354,14 @@ class EnsemblePipeline(BasePipeline):
             'training_history': self.training_history,
             'config': self.config
         }
+        
+        torch.save(checkpoint, checkpoint_path)
+        self.logger.info(f"Ensemble checkpoint saved to {checkpoint_path}")
     
-    def _restore_from_checkpoint(self, checkpoint):
-        """Restore ensemble state from checkpoint."""
+    def load_checkpoint(self, checkpoint_path):
+        """Load ensemble checkpoint."""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        
         for i, state_dict in enumerate(checkpoint['models']):
             self.ensemble.models[i].load_state_dict(state_dict)
         
