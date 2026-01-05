@@ -4,8 +4,6 @@ import torch
 from torch import Tensor
 from tqdm import tqdm
 from torch.nn import Parameter
-import torch.nn.functional as F
-from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
 
 
 class KGEModel(torch.nn.Module):

@@ -103,6 +103,19 @@ class Pipeline(BasePipeline):
                 self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
                 self.writer.add_scalar('Hits@10/Test', test_scores['hits@10'], epoch)
 
+                scores = self.test_uncertainty(
+                        self.model,
+                        self.config.get_section('calibration')['type'],
+                        self.data.edge_index,
+                        self.data.edge_type,
+                        self.data.valid_edge_index,
+                        self.data.valid_edge_type,
+                        uncertainty_samples=self.config.get_section('calibration')['mc_samples']
+                    )
+
+                self.writer.add_scalar('MC_Uncertainty/Brier_Score', scores['brier_score'], epoch)
+                self.writer.add_scalar('MC_Uncertainty/ECE', scores['ece'], epoch)
+
         
         # Close TensorBoard writer
         self.writer.close()
@@ -142,8 +155,8 @@ class Pipeline(BasePipeline):
         scores = self.test_link_pred(
             method=method,
             model=self.model,
-            valid_edge_index=self.data.valid_edge_index,
-            valid_edge_type=self.data.valid_edge_type,
+            valid_edge_index=self.data.test_edge_index,
+            valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
 
 
@@ -281,9 +294,11 @@ class Pipeline(BasePipeline):
         return valid_scores, None
 
     @torch.no_grad()
-    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples):
+    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples=None):
 
+       
         if method == 'mc_dropout':
+            assert uncertainty_samples is not None, "MC Dropout requires specifying number of samples."
             scores, labels = self.inference_mc(
                 edge_index,
                 edge_type,

@@ -4,8 +4,8 @@ Deep Ensemble wrapper for uncertainty estimation in knowledge graph link predict
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GAE
-from typing import List, Dict, Tuple
-import copy
+from typing import Tuple
+
 
 
 class DeepEnsemble(nn.Module):
