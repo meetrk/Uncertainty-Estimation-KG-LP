@@ -10,6 +10,8 @@ from model.trainer.pipeline import Pipeline
 import os.path as osp
 from misc.rel_link_pred_dataset import RelLinkPredDataset
 import torch
+from model.ensemble.deep_ensemble import DeepEnsemble
+from model.trainer.ensemble_pipeline import EnsemblePipeline
 from torch_geometric.nn import GAE
 
 def setup_logging(log_level: str = "INFO") -> None:
@@ -69,6 +71,7 @@ def main():
     dataset_config = config_loader.get_section('dataset') 
     model_config = config_loader.get_section('model')
     calibration_config = config_loader.get_section('calibration')
+    ensemble_config = config_loader.get_section('ensemble')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     if dataset_config['name'] == "WN18RR":
@@ -96,39 +99,71 @@ def main():
         raise ValueError("Unsupported decoder type specified")
 
     logger.info("Decoder calibration method: {}".format(calibration_config['method']))
+    
+    if ensemble_config['enabled']:
+        encoder_args = {
+            'num_nodes': data.num_nodes,
+            'num_relations': dataset.num_relations,
+            'model_config': model_config
+        }
+        
+        decoder_args = {
+            'num_nodes': data.num_nodes,
+            'num_relations': dataset.num_relations // 2,
+            'hidden_channels': model_config['encoder']['embedding_dim']
+        }
+        
+        # Create Deep Ensemble
+        num_models = ensemble_config['num_models']
+        logger.info(f"Creating Deep Ensemble with {num_models} models...")
+        ensemble = DeepEnsemble(
+            base_encoder_class=RGCN,
+            base_decoder_class=decoder,
+            encoder_args=encoder_args,
+            decoder_args=decoder_args,
+            num_models=num_models,
+            device=device
+        )
+        # Initialize pipeline
+        pipeline = EnsemblePipeline(
+            ensemble_model=ensemble,
+            data=data,
+            config=config_loader,
+            logger=logger
+        )
+    else:
+        decoder = decoder(
+            num_nodes=data.num_nodes,
+            num_relations=dataset.num_relations // 2,
+            hidden_channels=config_loader.get_section('model')['encoder']['embedding_dim'],
+            calibration = calibration_config['method'],
+        )
+        logger.info(f"Decoder initialized: {decoder}")
+        logger.info(f"Decoder parameters count: {sum(p.numel() for p in decoder.parameters())}")
 
-    decoder = decoder(
-        num_nodes=data.num_nodes,
-        num_relations=dataset.num_relations // 2,
-        hidden_channels=config_loader.get_section('model')['encoder']['embedding_dim'],
-        calibration = calibration_config['method'],
-    )
-    logger.info(f"Decoder initialized: {decoder}")
-    logger.info(f"Decoder parameters count: {sum(p.numel() for p in decoder.parameters())}")
-
-    encoder = RGCN(
-        num_nodes=data.num_nodes,
-        num_relations=dataset.num_relations,
-        model_config=model_config
-    )
-    logger.info("Encoder initialized successfully.")
-    logger.info(f"Encoder parameters count: {sum(p.numel() for p in encoder.parameters())}")
+        encoder = RGCN(
+            num_nodes=data.num_nodes,
+            num_relations=dataset.num_relations,
+            model_config=model_config
+        )
+        logger.info("Encoder initialized successfully.")
+        logger.info(f"Encoder parameters count: {sum(p.numel() for p in encoder.parameters())}")
 
 
-    model = GAE(encoder=encoder, decoder=decoder).to(device)
-    logger.info(f"GAE architecture:\n{model}")
-    # Initialize trainer
-    pipeline = Pipeline(
-        model=model,
-        data=data,
-        config=config_loader,
-        logger=logger
-    )
+        model = GAE(encoder=encoder, decoder=decoder).to(device)
+        logger.info(f"GAE architecture:\n{model}")
+        # Initialize trainer
+        pipeline = Pipeline(
+            model=model,
+            data=data,
+            config=config_loader,
+            logger=logger
+        )
     
     train_config = config_loader.get_section('training')
     if train_config['load_model']:
         logger.info("Starting uncertainty evaluation on test set...")
-        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'],calibration_config['type'],calibration_config['mc_samples'])
+        test_scores = pipeline.load_pipeline(train_config['checkpoint_path'],calibration_config['type'], train_config['save_model'])
         return
     else:
         # Start training
