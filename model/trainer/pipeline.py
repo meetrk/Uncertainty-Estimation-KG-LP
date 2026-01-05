@@ -1,7 +1,9 @@
-import torch
+from tqdm import tqdm
 from pathlib import Path
 from tqdm import tqdm
 import torch.nn.functional as F
+import torch
+from model.trainer.basepipeline import BasePipeline
 from utils.utils import negative_sampling
 from utils.evaluation import compute_mrr, compute_uncertainty, compute_mrr_mc_dropout
 from utils.utils import dropout_edges
@@ -9,26 +11,10 @@ from model.trainer.base_pipeline import BasePipeline
 
 
 class Pipeline(BasePipeline):
-    """Pipeline for training single model with MC Dropout and temperature calibration."""
 
     def __init__(self, model, data, config, logger):
-        # Call parent constructor
         super().__init__(model, data, config, logger)
         
-        # Pipeline-specific initialization
-        self.optimizer = torch.optim.Adam(
-            model.parameters(), 
-            lr=self.learning_rate,
-        )
-        self.all_triples = torch.stack([
-            self.data.edge_index[0],
-            self.data.edge_type,
-            self.data.edge_index[1]
-        ], dim=1)
-    
-    def _get_experiment_name(self):
-        """Get experiment name for TensorBoard logs."""
-        return f"experiment_{self.config.get_section('dataset')}"
 
     def start_pipeline(self):
         max_epochs = self.train_config['epochs']
@@ -41,10 +27,11 @@ class Pipeline(BasePipeline):
         best_val_mrr = -float('inf') 
         patience_counter = 0
         tqdm_range = range(1, max_epochs + 1)
-        tqdm_range = tqdm(tqdm_range, desc="Training", unit="batch")        
+        tqdm_range = tqdm(tqdm_range, desc="Training", unit="batch") 
+        self.logger.info(f"Negative sampling ratio: {self.train_config['sampling']['negative_sampling_ratio']}")       
 
         for epoch in tqdm_range:
-           
+            
             loss = self.train()
             val_loss = 0
             print(f'Epoch: {epoch:05d}, Loss: {loss:.4f}, Val Loss: {val_loss:.4f}')
@@ -70,7 +57,8 @@ class Pipeline(BasePipeline):
                     patience_counter = 0
                     
                     self.logger.info(f"New best model found! MRR: {current_val_mrr:.4f} > Previous: {best_val_mrr:.4f}")
-                    self.save_checkpoint(epoch) 
+                    if self.train_config['save_model']:
+                        self.save_checkpoint(epoch) 
                 else:
                     patience_counter += 1
                     self.logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
@@ -80,27 +68,73 @@ class Pipeline(BasePipeline):
                     self.logger.info("Early stopping triggered.")
                     break
 
-                # Use parent class method for logging evaluation metrics
-                self.log_evaluation_metrics(epoch, valid_scores, test_scores)
+                if test_scores is None:
+                    test_scores = {"mrr": 0, "mean_rank": 0, "hits@1": 0, "hits@3": 0, "hits@10": 0}
+
+
+                self.training_history['eval_metrics'].append({
+                    "epoch": epoch,
+                    "val_mrr": valid_scores["mrr"],
+                    "val_mean_rank": valid_scores["mean_rank"],
+                    "val_hits@1": valid_scores["hits@1"],
+                    "val_hits@3": valid_scores["hits@3"],
+                    "val_hits@10": valid_scores["hits@10"],
+                    "test_mrr": test_scores["mrr"],
+                    "test_mean_rank": test_scores["mean_rank"],
+                    "test_hits@1": test_scores["hits@1"],  
+                    "test_hits@3": test_scores["hits@3"],
+                    "test_hits@10": test_scores["hits@10"],
+                })
+                self.logger.info(f"Epoch {epoch}: Val MRR = {valid_scores['mrr']:.4f}, Test MRR = {test_scores['mrr']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Mean Rank = {valid_scores['mean_rank']:.4f}, Test Mean Rank = {test_scores['mean_rank']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Hits@1 = {valid_scores['hits@1']:.4f}, Test Hits@1 = {test_scores['hits@1']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Hits@3 = {valid_scores['hits@3']:.4f}, Test Hits@3 = {test_scores['hits@3']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Hits@10 = {valid_scores['hits@10']:.4f}, Test Hits@10 = {test_scores['hits@10']:.4f}")
+
+                # Log evaluation metrics to TensorBoard
+                self.writer.add_scalar('MRR/Validation', valid_scores['mrr'], epoch)
+                self.writer.add_scalar('MRR/Test', test_scores['mrr'], epoch)
+                self.writer.add_scalar('Mean_Rank/Validation', valid_scores['mean_rank'], epoch)
+                self.writer.add_scalar('Mean_Rank/Test', test_scores['mean_rank'], epoch)
+                self.writer.add_scalar('Hits@1/Validation', valid_scores['hits@1'], epoch)
+                self.writer.add_scalar('Hits@1/Test', test_scores['hits@1'], epoch)
+                self.writer.add_scalar('Hits@3/Validation', valid_scores['hits@3'], epoch)
+                self.writer.add_scalar('Hits@3/Test', test_scores['hits@3'], epoch)
+                self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
+                self.writer.add_scalar('Hits@10/Test', test_scores['hits@10'], epoch)
+
+                scores = self.test_uncertainty(
+                        self.model,
+                        self.config.get_section('calibration')['type'],
+                        self.data.edge_index,
+                        self.data.edge_type,
+                        self.data.valid_edge_index,
+                        self.data.valid_edge_type,
+                        uncertainty_samples=self.config.get_section('calibration')['mc_samples']
+                    )
+
+                self.writer.add_scalar('MC_Uncertainty/Brier_Score', scores['brier_score'], epoch)
+                self.writer.add_scalar('MC_Uncertainty/ECE', scores['ece'], epoch)
 
         
+        # Close TensorBoard writer
         self.writer.close()
         self.logger.info("Training completed!")
         return self.training_history
 
-    def load_pipeline(self, checkpoint_path, method, uncertainty_samples=5):
+    def load_pipeline(self, checkpoint_path, method,save):
 
 
         self.load_checkpoint(checkpoint_path)
         self.logger.info("Pipeline loaded from checkpoint.")
-        
+        uncertainty_samples = self.config.get_section('calibration')['mc_samples']
         scores = self.test_link_pred(
             method=method,
             model=self.model,
             valid_edge_index=self.data.valid_edge_index,
             valid_edge_type=self.data.valid_edge_type,
             mc_samples=uncertainty_samples)
-
+        
         scores = self.test_uncertainty(
             self.model,
             method,
@@ -121,8 +155,8 @@ class Pipeline(BasePipeline):
         scores = self.test_link_pred(
             method=method,
             model=self.model,
-            valid_edge_index=self.data.valid_edge_index,
-            valid_edge_type=self.data.valid_edge_type,
+            valid_edge_index=self.data.test_edge_index,
+            valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
 
 
@@ -135,9 +169,9 @@ class Pipeline(BasePipeline):
             self.data.test_edge_type,
             uncertainty_samples
         )
-
-        self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
-
+        if save:
+            self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
+        
     def _inference_mc_helper(self, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples=10, return_logits=False):
         """Helper method for MC dropout inference without gradient control.
         
@@ -207,32 +241,6 @@ class Pipeline(BasePipeline):
         """Standard inference with gradients disabled."""
         return self._inference_helper(model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False)
 
-    @torch.no_grad()
-    def test_link_pred(self, method, model, valid_edge_index, valid_edge_type,  mc_samples=10):
-
-        self.logger.info("Starting link prediction evaluation...")
-        self.logger.info(f"Evaluation method: {method}")
-
-        model.eval()
-        if method == 'standard':
-            scores = compute_mrr(valid_edge_index, valid_edge_type ,self.data, model)   
-
-        elif method == 'mc_dropout':
-            scores = compute_mrr_mc_dropout(self.data.edge_index, self.data.edge_type,
-                                valid_edge_index, valid_edge_type,
-                                self.data, model, mc_samples=mc_samples)
-
-        else:
-            raise ValueError(f"Unsupported evaluation method: {method}")
-        
-        self.logger.info(f"MRR = {scores['mrr']:.4f}")
-        self.logger.info(f"Mean Rank = {scores['mean_rank']:.4f}")
-        self.logger.info(f"Hits@1 = {scores['hits@1']:.4f}")
-        self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
-        self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
-        
-        return scores
-
     def train(self):
         """
         Train the model on a single batch.
@@ -286,9 +294,11 @@ class Pipeline(BasePipeline):
         return valid_scores, None
 
     @torch.no_grad()
-    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples):
+    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples=None):
 
+       
         if method == 'mc_dropout':
+            assert uncertainty_samples is not None, "MC Dropout requires specifying number of samples."
             scores, labels = self.inference_mc(
                 edge_index,
                 edge_type,
@@ -351,38 +361,6 @@ class Pipeline(BasePipeline):
                 'min': temps.min().item(),
                 'max': temps.max().item()
             }
-    
-    def _log_temperature_stats(self, stats, prefix="", level="info"):
-        """Log temperature statistics in a consistent format."""
-        msg = f"{prefix}Temperature - Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}, Min: {stats['min']:.4f}, Max: {stats['max']:.4f}"
-        if level == "info":
-            self.logger.info(msg)
-        else:
-            self.logger.debug(msg)
-    
-    def _freeze_non_temperature_params(self, model, param_filter):
-        """Freeze all parameters except those matching the filter.
-        
-        Args:
-            model: The model to freeze parameters in
-            param_filter: Function that returns True if parameter should be trainable
-        
-        Returns:
-            list: Trainable parameters
-        """
-        trainable_params = []
-        for name, param in model.named_parameters():
-            if param_filter(name):
-                param.requires_grad = True
-                trainable_params.append(param)
-                self.logger.info(f"Trainable: {name}, Shape: {param.shape}")
-            else:
-                param.requires_grad = False
-        
-        if not trainable_params:
-            self.logger.warning("No trainable parameters found for calibration!")
-        
-        return trainable_params
 
     def compute_nll_loss(self, model, params):
         """
@@ -601,19 +579,3 @@ class Pipeline(BasePipeline):
             param.requires_grad = True
         
         return final_temp
-
-    def _build_checkpoint(self, epoch):
-        """Build checkpoint dictionary."""
-        return {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'training_history': self.training_history,
-            'config': self.config
-        }
-    
-    def _restore_from_checkpoint(self, checkpoint):
-        """Restore model state from checkpoint."""
-        self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.training_history = checkpoint.get('training_history', {'train_loss': [], 'eval_metrics': []})
