@@ -46,7 +46,9 @@ class KGEModel(torch.nn.Module):
             # Initialize to output ~1.0 (no scaling) initially
             for param in self.temp_network.parameters():
                 param.data.normal_(0, 0.01)
-
+        elif self.calibration == "isotonic_regression":
+            self.use_calibration = False 
+            self.isotonic_regression_transform = None  # To be set during calibration
         elif self.calibration == "none":
             self.temperature = Parameter(torch.ones(1), requires_grad=False)
         else:

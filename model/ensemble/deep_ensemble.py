@@ -111,40 +111,30 @@ class DeepEnsemble(nn.Module):
         edge_type, 
         pred_edge_index, 
         pred_edge_type,
-        return_all_preds: bool = False
+        return_all_preds: bool = False,
+        enable_grad: bool = False  
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Make predictions with uncertainty estimates.
-        
-        Args:
-            edge_index: Training edge indices
-            edge_type: Training edge types
-            pred_edge_index: Prediction edge indices
-            pred_edge_type: Prediction edge types
-            return_all_preds: Whether to return all individual predictions
-        
-        Returns:
-            mean_pred: Mean prediction across ensemble
-            std_pred: Standard deviation across ensemble (epistemic uncertainty)
-            (optional) all_preds: All individual predictions if return_all_preds=True
-        """
+        """Make predictions with uncertainty estimates."""
         self.eval()
-        with torch.no_grad():
+        if enable_grad:
             predictions = self.forward_ensemble(
                 edge_index, edge_type, pred_edge_index, pred_edge_type
             )
-            
-            # Stack predictions: shape (num_models, num_predictions)
-            preds_stack = torch.stack(predictions, dim=0)
-            
-            # Compute mean and std
-            mean_pred = preds_stack.mean(dim=0)
-            std_pred = preds_stack.std(dim=0)
-            
-            if return_all_preds:
-                return mean_pred, std_pred, preds_stack
-            else:
-                return mean_pred, std_pred
+        else:
+            with torch.no_grad():
+                predictions = self.forward_ensemble(
+                    edge_index, edge_type, pred_edge_index, pred_edge_type
+                )
+        
+        # Rest stays the same
+        preds_stack = torch.stack(predictions, dim=0)
+        mean_pred = preds_stack.mean(dim=0)
+        std_pred = preds_stack.std(dim=0)
+        
+        if return_all_preds:
+            return mean_pred, std_pred, preds_stack
+        else:
+            return mean_pred, std_pred
     
     def get_optimizers(self, lr: float, weight_decay: float = 0.0):
         """

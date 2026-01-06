@@ -2,12 +2,9 @@ import torch
 from pathlib import Path
 from model.trainer.basepipeline import BasePipeline
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
-from datetime import datetime
 from utils.utils import negative_sampling, dropout_edges
 from utils.evaluation import  compute_uncertainty,compute_mrr_ensemble
-import numpy as np
 
 
 class EnsemblePipeline(BasePipeline):
@@ -98,7 +95,7 @@ class EnsemblePipeline(BasePipeline):
                     self.logger.info(f"New best ensemble! MRR: {best_val_mrr:.4f}")
                     
                     if self.train_config['save_model']:
-                        self.save_checkpoint(epoch) 
+                        self.save_checkpoint(epoch, name=f"{self.config.get_section('dataset')['name']}_ensemble_checkpoint_{self.config.get_section('calibration')['method']}_epoch_{epoch}.pth") 
                 else:
                     patience_counter += 1
                     self.logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
@@ -155,7 +152,8 @@ class EnsemblePipeline(BasePipeline):
             
             # Compute loss
             out = torch.cat([pos_out, neg_out])
-            gt = torch.cat([torch.ones_like(pos_out) - 0.1, torch.zeros_like(neg_out) + 0.05])
+            gt = torch.cat([torch.full_like(pos_out, self.train_config['label_smoothing']['positive']), torch.full_like(neg_out, self.train_config['label_smoothing']['negative'])])
+
             
             cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
             reg_loss = z.pow(2).mean() + model.decoder.rel_emb.pow(2).mean()
@@ -189,19 +187,21 @@ class EnsemblePipeline(BasePipeline):
         
         return valid_scores, None
     
-    def _inference_helper(self, model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False):
+    def _inference_helper(self, model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False, apply_isotonic=False, enable_grad=False):
         """Helper method for standard inference without gradient control.
         
         Args:
             return_logits: If True, return raw logits; if False, return sigmoid probabilities
+            apply_isotonic: If True, apply isotonic regression calibration (only for uncertainty evaluation)
         """
-        model.eval()
+
         # Get predictions with uncertainty
         mean_pred, std_pred = model.predict_with_uncertainty(
             edge_index,
             edge_type,
             test_edge_index,
             test_edge_type,
+            enable_grad=enable_grad
         )
         
         # Also get negative samples for evaluation
@@ -211,6 +211,7 @@ class EnsemblePipeline(BasePipeline):
             edge_type,
             neg_edge_index,
             neg_edge_type,
+            enable_grad=enable_grad
         )
         
         # Combine positive and negative predictions
@@ -221,7 +222,13 @@ class EnsemblePipeline(BasePipeline):
             torch.zeros_like(neg_mean_pred)
         ])
         
-        if not return_logits:
+        # Apply isotonic regression if requested (for uncertainty quantification only)
+        if apply_isotonic and hasattr(model, 'isotonic_regression_transform') and model.isotonic_regression_transform is not None:
+            device = all_mean_pred.device
+            logits_np = all_mean_pred.cpu().numpy().flatten()
+            calibrated_logits_np = model.isotonic_regression_transform.predict(logits_np)
+            all_mean_pred = torch.tensor(calibrated_logits_np, dtype=torch.float32, device=device)
+        elif not return_logits:
             all_mean_pred = torch.sigmoid(all_mean_pred)
 
         return all_mean_pred, labels
@@ -240,13 +247,26 @@ class EnsemblePipeline(BasePipeline):
         Returns uncertainty metrics: Brier score, ECE, etc.
         """
         
-        all_mean_pred, labels = self.inference(
+        # Check if isotonic regression calibration is available
+        use_isotonic = (hasattr(model, 'isotonic_regression_transform') and 
+                       model.isotonic_regression_transform is not None and
+                       hasattr(model, 'use_isotonic_calibration') and
+                       model.use_isotonic_calibration)
+        
+        all_mean_pred, labels = self._inference_helper(
                 model,
                 edge_index,
                 edge_type,
                 test_edge_index,
                 test_edge_type,
+                return_logits=False,
+                apply_isotonic=use_isotonic,
+                enable_grad=False
             )
+        
+        labels = labels.flatten()
+        all_mean_pred = all_mean_pred.flatten()
+        
         # Compute uncertainty metrics
         scores = compute_uncertainty(labels, all_mean_pred)
     
@@ -257,20 +277,20 @@ class EnsemblePipeline(BasePipeline):
 
         return scores
 
-    def load_pipeline(self, checkpoint_path, method,save):
+    def load_pipeline(self, checkpoint_path, type,save):
         """Load ensemble pipeline from checkpoint."""
-        self.load_checkpoint(checkpoint_path)
+        self.load_checkpoint(checkpoint_path, load_optimizer=False)
         self.logger.info("Checkpoint loaded. Evaluating ensemble uncertainty on test set...")
 
         scores = self.test_link_pred(
-            method=method,
+            type=type,
             model=self.ensemble,
             valid_edge_index=self.data.valid_edge_index,
             valid_edge_type=self.data.valid_edge_type)
         
         scores = self.test_uncertainty(
             self.model,
-            method,
+            type,
             self.data.edge_index,
             self.data.edge_type,
             self.data.valid_edge_index,
@@ -285,14 +305,14 @@ class EnsemblePipeline(BasePipeline):
         )
 
         scores = self.test_link_pred(
-            method=method,
+            type=type,
             model=self.ensemble,
             valid_edge_index=self.data.valid_edge_index,
             valid_edge_type=self.data.valid_edge_type)
         
         scores = self.test_uncertainty(
             self.model,
-            method,
+            type,
             self.data.edge_index,
             self.data.edge_type,
             self.data.test_edge_index,
@@ -358,15 +378,16 @@ class EnsemblePipeline(BasePipeline):
         torch.save(checkpoint, checkpoint_path)
         self.logger.info(f"Ensemble checkpoint saved to {checkpoint_path}")
     
-    def load_checkpoint(self, checkpoint_path):
+    def load_checkpoint(self, checkpoint_path, load_optimizer=False):
         """Load ensemble checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         for i, state_dict in enumerate(checkpoint['models']):
-            self.ensemble.models[i].load_state_dict(state_dict)
+            self.ensemble.models[i].load_state_dict(state_dict, strict=False)
         
-        for i, state_dict in enumerate(checkpoint['optimizers']):
-            self.optimizers[i].load_state_dict(state_dict)
+        if load_optimizer:
+            for i, state_dict in enumerate(checkpoint['optimizers']):
+                self.optimizers[i].load_state_dict(state_dict)
         
         self.training_history = checkpoint.get('training_history', {
             'train_loss': [], 'eval_metrics': [], 'ensemble_diversity': []
@@ -388,6 +409,8 @@ class EnsemblePipeline(BasePipeline):
             return self.calibrate_scalar_temperature(model, max_iters, lr, type_params)
         elif method == 'input_dependent':
             return self.calibrate_input_dependent_temperature(model, max_iters, lr, type_params)
+        elif method == 'isotonic_regression':
+            return self.calibrate_isotonic_regression(model)
         else:
             raise ValueError(f"Unsupported calibration method: {method}")
     
@@ -433,16 +456,14 @@ class EnsemblePipeline(BasePipeline):
         Returns:
             NLL loss value
         """
-        # For calibration, we need gradients to flow through temperature
-        # Call helper methods without @torch.no_grad() decorator to enable gradients
-        
         logits, labels = self._inference_helper(
                 model,
                 self.data.edge_index,
                 self.data.edge_type,
                 self.data.valid_edge_index,
                 self.data.valid_edge_type,
-                return_logits=True  # Return raw logits for loss computation
+                return_logits=True,
+                enable_grad=True
             )
         
         nll_loss = F.binary_cross_entropy_with_logits(logits, labels)
@@ -666,3 +687,52 @@ class EnsemblePipeline(BasePipeline):
                 param.requires_grad = True
         
         return {f'model_{i}_temp': t for i, t in enumerate(final_temps)}
+    
+    def calibrate_isotonic_regression(self, model):
+        """Calibrate using isotonic regression on validation set for ensemble.
+        
+        For ensembles, we fit isotonic regression on the ensemble mean predictions
+        to calibrate the aggregated uncertainty estimates.
+        
+        Args:
+            model: Ensemble model
+            
+        Returns:
+            dict: Calibration results
+        """
+        from sklearn.isotonic import IsotonicRegression
+        import numpy as np
+
+        self.logger.info("Starting Isotonic Regression Calibration for Ensemble")
+
+        # Get ensemble predictions (raw logits) and labels
+        model.eval()
+        with torch.no_grad():
+            logits, labels = self._inference_helper(
+                model,
+                self.data.edge_index,
+                self.data.edge_type,
+                self.data.valid_edge_index,
+                self.data.valid_edge_type,
+                return_logits=True  # Get raw ensemble mean logits
+            )
+        
+        logits_np = logits.cpu().numpy().flatten()
+        labels_np = labels.cpu().numpy().flatten()
+
+        # Fit isotonic regression on ensemble mean predictions
+        iso_reg = IsotonicRegression(out_of_bounds='clip')
+        iso_reg.fit(logits_np, labels_np)
+
+        self.logger.info("Isotonic Regression model fitted on ensemble predictions.")
+        
+        # Store the isotonic regression transform in the ensemble
+        # This will be applied to the ensemble mean predictions
+        model.isotonic_regression_transform = iso_reg
+        model.use_isotonic_calibration = True
+        
+        self.logger.info("Calibration Complete!")
+
+        return {"isotonic_model": iso_reg}
+
+

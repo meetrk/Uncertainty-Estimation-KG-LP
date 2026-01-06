@@ -38,7 +38,7 @@ class BasePipeline:
     def start_pipeline(self) -> dict[str, list]:
         raise NotImplementedError
 
-    def load_pipeline(self, checkpoint_path, method, save):
+    def load_pipeline(self, checkpoint_path, type, save):
         raise NotImplementedError
     
 
@@ -51,24 +51,24 @@ class BasePipeline:
 
 
     @torch.no_grad()
-    def test_link_pred(self, method, model, valid_edge_index, valid_edge_type,  mc_samples=10):
+    def test_link_pred(self, type, model, valid_edge_index, valid_edge_type,  mc_samples=10):
 
         self.logger.info("Starting link prediction evaluation...")
-        self.logger.info(f"Evaluation method: {method}")
-
+        self.logger.info(f"Uncertainty Estimation Type : {type}")
+        self.logger.info(f"Calibration Method : {self.config.get_section('calibration')['method']}")
         model.eval()
-        if method == 'standard':
+        if type == 'standard':
             scores = compute_mrr(valid_edge_index, valid_edge_type ,self.data, model)   
 
-        elif method == 'mc_dropout':
+        elif type == 'mc_dropout':
             scores = compute_mrr_mc_dropout(self.data.edge_index, self.data.edge_type,
                                 valid_edge_index, valid_edge_type,
                                 self.data, model, mc_samples=mc_samples)
-        elif method == 'ensemble':
+        elif type == 'ensemble':
             scores = compute_mrr_ensemble(self.data.edge_index, self.data.edge_type,
                                 valid_edge_index, valid_edge_type, self.data, model)
         else:
-            raise ValueError(f"Unsupported evaluation method: {method}")
+            raise ValueError(f"Unsupported evaluation type: {type}")
         
         self.logger.info(f"MRR = {scores['mrr']:.4f}")
         self.logger.info(f"Mean Rank = {scores['mean_rank']:.4f}")
@@ -188,12 +188,24 @@ class BasePipeline:
         
         self.logger.info(f"Checkpoint saved to {checkpoint_path}")
     
-    def load_checkpoint(self, checkpoint_path):
-        """Load model checkpoint."""
+    def load_checkpoint(self, checkpoint_path, load_optimizer=False):
+        """Load model checkpoint.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+            load_optimizer: Whether to load optimizer state (only needed when resuming training)
+        """
         checkpoint = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
         
         self.model.load_state_dict(checkpoint['model_state_dict'],strict=False)
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        if load_optimizer:
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                self.logger.info("Optimizer state loaded")
+            except (ValueError, KeyError) as e:
+                self.logger.warning(f"Could not load optimizer state: {e}. Continuing without it.")
+        
         self.training_history = checkpoint.get('training_history', {'train_loss': [], 'eval_metrics': []})
         self.epoch = checkpoint['epoch']
         

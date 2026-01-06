@@ -63,16 +63,13 @@ class DistMult(KGEModel):
         rel = self.rel_emb[edge_type]
 
         if self.calibration == "input_dependent":
-            # Compute query-dependent temperature for each (head, relation) pair
-            temperature = self.compute_temperature(head, rel)  # [batch_size, 1]
+            temperature = self.compute_temperature(head, rel) 
 
-            # Score computation: element-wise product
-            scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  # [batch_size, 1]
+            scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  
             
-            # Apply input-dependent temperature scaling
-            scores = scores / temperature  # [batch_size, 1]
+            scores = scores / temperature  
 
-            return scores.squeeze(-1)  # [batch_size] 
+            return scores.squeeze(-1)  
             
         elif self.calibration == "scalar":
             
@@ -80,9 +77,10 @@ class DistMult(KGEModel):
             scores = scores / self.temperature 
             
             return scores
-        
+        elif self.calibration == "isotonic_regression":
+
+            scores = torch.sum(head * rel * tail, dim=1, keepdim=True)
+            return scores.squeeze(-1)
         else:
             scores  = torch.sum(head * rel * tail, dim=1, keepdim=True)
             return scores
-        
-        # return scores.squeeze(-1)  # [batch_size] 
