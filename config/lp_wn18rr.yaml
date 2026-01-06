@@ -15,7 +15,11 @@ model:
     l2_penalty : 0.001
     w_gain: false
     b_init: false
-  
+
+ensemble:
+  enabled: false
+  num_models: 5 
+
 training:
   epochs: 10000
   sampling:
@@ -31,9 +35,14 @@ training:
     patience: 10
     delta: 0.001
   load_model: true
-  mc_samples: 1
+  save_model: true
   checkpoint_path: ./checkpoints/WN18RR_checkpoint_best_model_label_smoothing.pth
+  label_smoothing: 
+    positive: 0.9 
+    negative: 0.05
 calibration:
-  method: temperature_scaling
-  max_iters: 50
+  type: standard
+  mc_samples: 5
+  method: isotonic_regression
+  max_iters: 20
   learning_rate: 0.01

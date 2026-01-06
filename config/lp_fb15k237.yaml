@@ -12,13 +12,18 @@ model:
 
   decoder:
     type: DistMult
-    l2_penalty_type: schlichtkrull-l2
-    l2_penalty : 0.01
+    l2_penalty : 0.001
+    w_gain: false
+    b_init: false
   
+ensemble:
+  enabled: true
+  num_models: 5 
+
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 3
+    negative_sampling_ratio: 1
     edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
@@ -27,12 +32,17 @@ training:
   save_frequency: 1000
   early stopping:
     enabled: true
-    patience: 10
+    patience: 5
     delta: 0.001
   load_model: false
-  mc_samples: 1
-  checkpoint_path: ./checkpoints/FB15k-237_checkpoint_epoch_1000.pth
+  save_model: true
+  checkpoint_path: ./checkpoints/FB15k-237_ensemble_checkpoint_epoch_4000.pth
+  label_smoothing: 
+    positive: 0.9
+    negative: 0.05
 calibration:
-  method: temperature_scaling
+  type: ensemble
+  mc_samples: 5
+  method: input_dependent
   max_iters: 20
   learning_rate: 0.01
