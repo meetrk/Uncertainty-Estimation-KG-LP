@@ -122,7 +122,8 @@ def main():
             encoder_args=encoder_args,
             decoder_args=decoder_args,
             num_models=num_models,
-            device=device
+            device=device,
+            calibration=calibration_config['method']
         )
         # Initialize pipeline
         pipeline = EnsemblePipeline(

@@ -157,6 +157,9 @@ class BasePipeline:
             'embedding_dim': self.model_config['encoder']['embedding_dim'],
             'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
             'num_bases': self.model_config['encoder']['num_bases'],
+            'dropout_rate': self.model_config['encoder']['dropout_rate'],
+            'postive_label_smoothing': self.train_config.get('label_smoothing', {}).get('positive', 0.0),
+            'negative_label_smoothing': self.train_config.get('label_smoothing', {}).get('negative', 0.0),
             # 'sampling_method': self.train_config['sampling']['method']
         }
         
