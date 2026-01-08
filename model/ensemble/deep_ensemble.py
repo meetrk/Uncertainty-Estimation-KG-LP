@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import GAE
 from typing import Tuple
+from torch.nn import Parameter
 
 
 
@@ -31,7 +32,8 @@ class DeepEnsemble(nn.Module):
         encoder_args: dict,
         decoder_args: dict,
         num_models: int = 5,
-        device: str = 'cuda'
+        device: str = 'cuda',
+        calibration: str = "none"
     ):
         super(DeepEnsemble, self).__init__()
         
@@ -41,6 +43,7 @@ class DeepEnsemble(nn.Module):
         self.base_decoder_class = base_decoder_class
         self.encoder_args = encoder_args
         self.decoder_args = decoder_args
+        self.calibration = calibration
         
         # Create ensemble of models
         self.models = nn.ModuleList()
@@ -51,6 +54,33 @@ class DeepEnsemble(nn.Module):
             self.models.append(model)
         
         self.to(device)
+
+        if self.calibration == "scalar":
+            self.temperature = Parameter(torch.ones(1), requires_grad=False)
+            self.temperature.to(device)
+
+        elif self.calibration == "input_dependent":
+            self.temp_network = torch.nn.Sequential(
+                torch.nn.Linear(2 * encoder_args['hidden_channels'], encoder_args['hidden_channels'] // 2),
+                torch.nn.ReLU(),
+                torch.nn.Linear(encoder_args['hidden_channels'] // 2, 1),
+                torch.nn.Softplus()  
+            )
+            self.temp_network.to(device)
+            # Initialize to output ~1.0 (no scaling) initially
+            for param in self.temp_network.parameters():
+                param.data.normal_(0, 0.01)
+        elif self.calibration == "isotonic_regression":
+            self.isotonic_regression_transform = None  # To be set during calibration
+
+        elif self.calibration == "none":
+            self.temperature = Parameter(torch.ones(1), requires_grad=False)
+            self.temperature.to(device)
+        else:
+            raise ValueError("Unsupported calibration method specified")
+        
+        self.use_calibration = False
+
     
     def get_model(self, idx: int):
         """Get a specific model from the ensemble."""
@@ -90,7 +120,7 @@ class DeepEnsemble(nn.Module):
             return [self.models[i].decode(z[i], edge_index, edge_type) 
                     for i in range(self.num_models)]
     
-    def forward_ensemble(self, edge_index, edge_type, pred_edge_index, pred_edge_type):
+    def forward_ensemble(self, edge_index, edge_type, pred_edge_index, pred_edge_type) -> list:
         """
         Forward pass through all ensemble members.
         
@@ -100,7 +130,8 @@ class DeepEnsemble(nn.Module):
         predictions = []
         for model in self.models:
             z = model.encode(edge_index, edge_type)
-            pred = model.decode(z, pred_edge_index, pred_edge_type)
+            logits = model.decode(z, pred_edge_index, pred_edge_type)
+            pred = torch.sigmoid(logits)
             predictions.append(pred)
         
         return predictions
@@ -111,7 +142,7 @@ class DeepEnsemble(nn.Module):
         edge_type, 
         pred_edge_index, 
         pred_edge_type,
-        return_all_preds: bool = False,
+        return_logits: bool = False,
         enable_grad: bool = False  
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Make predictions with uncertainty estimates."""
@@ -130,11 +161,19 @@ class DeepEnsemble(nn.Module):
         preds_stack = torch.stack(predictions, dim=0)
         mean_pred = preds_stack.mean(dim=0)
         std_pred = preds_stack.std(dim=0)
-        
-        if return_all_preds:
-            return mean_pred, std_pred, preds_stack
+        eps = 1e-6
+        mean_prob_clamped = torch.clamp(mean_pred, min=eps, max=1-eps)
+        ensemble_logit = torch.logit(mean_prob_clamped)
+
+        if self.calibration == "scalar" and self.use_calibration:
+            calibrated_logit = ensemble_logit / self.temperature.to(ensemble_logit.device)
         else:
-            return mean_pred, std_pred
+            calibrated_logit = ensemble_logit
+
+        if return_logits:
+            return calibrated_logit, std_pred
+        else:
+            return torch.sigmoid(calibrated_logit), std_pred        
     
     def get_optimizers(self, lr: float, weight_decay: float = 0.0):
         """

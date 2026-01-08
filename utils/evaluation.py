@@ -23,41 +23,40 @@ def hits_at_k(ranks: List[int], k: int) -> float:
     """Calculate Hits@K metric."""
     return float(np.mean([1.0 if rank <= k else 0.0 for rank in ranks]))
 
-def filter_scores(scores, batch, true_triples, head=True):
-    """Filters a score matrix by setting the scores of known non-target true triples to -infinity"""
-    
-    device = scores.device
-    indices = []  # indices of triples whose scores should be set to -infinity
+def create_filter_dicts(data):
+    """
+    Pre-computes hash maps for fast link prediction filtering.
+    Returns:
+        head_filter: Dict[(tail, rel) -> Set[heads]]
+        tail_filter: Dict[(head, rel) -> Set[tails]]
+    """
+    head_filter = {}
+    tail_filter = {}
 
-    # true_triples should be a set of tuples (h, r, t) for faster lookup
-    if isinstance(true_triples, tuple):
-        heads, tails = true_triples
-        # Convert to set format for compatibility
-        true_triples_set = set()
-        for p in heads:
-            for o in heads[p]:
-                for h in heads[p][o]:
-                    true_triples_set.add((h, p, o))
-    else:
-        # Assume true_triples is already a set or list of (h, r, t) tuples
-        true_triples_set = set(tuple(triple) for triple in true_triples)
+    # Combine all edges (train, val, test)
+    # Move to CPU list for faster Python dictionary insertion
+    edges = [
+        (data.train_edge_index, data.train_edge_type),
+        (data.valid_edge_index, data.valid_edge_type),
+        (data.test_edge_index, data.test_edge_type),
+    ]
 
-    for i, (s, p, o) in enumerate(batch):
-        s, p, o = (s.item(), p.item(), o.item())
-        if head:
-            # Filter head predictions: check all (?, p, o) combinations
-            for candidate_h in range(scores.size(1)):
-                if candidate_h != s and (candidate_h, p, o) in true_triples_set:
-                    indices.append((i, candidate_h))
-        else:
-            # Filter tail predictions: check all (s, p, ?) combinations
-            for candidate_t in range(scores.size(1)):
-                if candidate_t != o and (s, p, candidate_t) in true_triples_set:
-                    indices.append((i, candidate_t))
+    for edge_index, edge_type in edges:
+        src = edge_index[0].tolist()
+        dst = edge_index[1].tolist()
+        rel = edge_type.tolist()
 
-    if indices:
-        indices = torch.tensor(indices, device=device)
-        scores[indices[:, 0], indices[:, 1]] = float('-inf')
+        for s, d, r in zip(src, dst, rel):
+            # Key: (Source, Relation), Value: Set of Dests
+            if (s, r) not in tail_filter: tail_filter[(s, r)] = set()
+            tail_filter[(s, r)].add(d)
+
+            # Key: (Dest, Relation), Value: Set of Sources
+            if (d, r) not in head_filter: head_filter[(d, r)] = set()
+            head_filter[(d, r)].add(s)
+
+    return head_filter, tail_filter
+
 
 @torch.no_grad()
 def compute_rank(ranks):
@@ -129,77 +128,111 @@ def compute_mrr( edge_index, edge_type, data, model):
 @torch.no_grad()
 def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_type, data, models: DeepEnsemble):
     """
-    Compute MRR for ensemble
+    Optimized MRR computation:
+    1. Pre-computes node embeddings (Z) once.
+    2. Uses hash maps for O(1) filtering.
+    3. Decodes directly using cached Z.
     """
-    # OPTIMIZATION: Encode graph once per model and cache
-    all_z = []
-    for model_idx in range(models.num_models):
-        model = models.get_model(model_idx)
-        z = model.encode(train_edge_index, train_edge_type)
-        all_z.append(z)
+    models.eval()
+    device = models.device
+    num_nodes = data.num_nodes
+
+    encoded_zs = models.encode(train_edge_index, train_edge_type)
+    head_filter, tail_filter = create_filter_dicts(data)
     
     ranks = []
-    for i in tqdm(range(edge_type.numel()), desc="Computing MRR"):
-        (src, dst), rel = edge_index[:, i], edge_type[i]
+    models.use_calibration = True 
+    
+    # Pre-allocate a mask tensor to reuse memory
+    mask_container = torch.ones(num_nodes, dtype=torch.bool, device=device)
+    all_nodes = torch.arange(num_nodes, device=device)
 
-        # Try all nodes as tails, but delete true triplets:
-        tail_mask = torch.ones(data.num_nodes, dtype=torch.bool)
-        for (heads, tails), types in [
-            (data.train_edge_index, data.train_edge_type),
-            (data.valid_edge_index, data.valid_edge_type),
-            (data.test_edge_index, data.test_edge_type),
-        ]:
-            tail_mask[tails[(heads == src) & (types == rel)]] = False
+    iterator = tqdm(range(edge_type.numel()), desc="Computing MRR (Optimized)")
+    
+    for i in iterator:
+        src = edge_index[0, i].item()
+        dst = edge_index[1, i].item()
+        rel = edge_type[i].item()
 
-        tail = torch.arange(data.num_nodes)[tail_mask]
-        tail = torch.cat([torch.tensor([dst]), tail])
-        head = torch.full_like(tail, fill_value=src)
-        eval_edge_index = torch.stack([head, tail], dim=0)
-        eval_edge_type = torch.full_like(tail, fill_value=rel)
-
-        # Use cached encodings for prediction
-        predictions = []
-        for model_idx in range(models.num_models):
-            model = models.get_model(model_idx)
-            pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
-            predictions.append(pred)
+        true_tails = tail_filter.get((src, rel), set())
         
-        out = torch.mean(torch.stack(predictions, dim=0), dim=0)
-        rank = compute_rank(out)
-        ranks.append(rank)
-
-        # Try all nodes as heads, but delete true triplets:
-        head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
-        for (heads, tails), types in [
-            (data.train_edge_index, data.train_edge_type),
-            (data.valid_edge_index, data.valid_edge_type),
-            (data.test_edge_index, data.test_edge_type),
-        ]:
-            head_mask[heads[(tails == dst) & (types == rel)]] = False
-
-        head = torch.arange(data.num_nodes)[head_mask]
-        head = torch.cat([torch.tensor([src]), head])
-        tail = torch.full_like(head, fill_value=dst)
-        eval_edge_index = torch.stack([head, tail], dim=0)
-        eval_edge_type = torch.full_like(head, fill_value=rel)
-
-        # Use cached encodings for prediction
-        predictions = []
-        for model_idx in range(models.num_models):
-            model = models.get_model(model_idx)
-            pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
-            predictions.append(pred)
+        mask_container.fill_(True)
         
-        out = torch.mean(torch.stack(predictions, dim=0), dim=0)
-        rank = compute_rank(out)
-        ranks.append(rank)
+        if true_tails:
+            indices = torch.tensor(list(true_tails), device=device)
+            mask_container[indices] = False
+            
+        
+        # Mask out the target from the general candidates to avoid duplication
+        mask_container[dst] = False
+        
+        # Get all negatives
+        negatives = all_nodes[mask_container]
+        
+        tail_candidates = torch.cat([torch.tensor([dst], device=device), negatives])
+        
+        # Create eval edges
+        head_candidates = torch.full_like(tail_candidates, fill_value=src)
+        eval_edge_index = torch.stack([head_candidates, tail_candidates], dim=0)
+        eval_edge_type = torch.full_like(tail_candidates, fill_value=rel)
 
+        outs = []
+        for k, model in enumerate(models.models):
+        
+            logits = model.decode(encoded_zs[k], eval_edge_index, eval_edge_type)
+            probs = torch.sigmoid(logits)
+            outs.append(probs)
+            
+        # 4. Aggregation & Calibration
+        mean_pred = torch.stack(outs, dim=0).mean(dim=0)
+        
+        if models.calibration == "scalar" and models.use_calibration:
+            score = torch.logit(mean_pred) / models.temperature.to(device)
+        else:
+            score = mean_pred
+            
+        ranks.append(compute_rank(score))
+
+        
+        true_heads = head_filter.get((dst, rel), set())
+        
+        mask_container.fill_(True)
+        if true_heads:
+            indices = torch.tensor(list(true_heads), device=device)
+            mask_container[indices] = False
+            
+        mask_container[src] = False
+        negatives = all_nodes[mask_container]
+        
+        head_candidates = torch.cat([torch.tensor([src], device=device), negatives])
+        tail_candidates = torch.full_like(head_candidates, fill_value=dst)
+        
+        eval_edge_index = torch.stack([head_candidates, tail_candidates], dim=0)
+        eval_edge_type = torch.full_like(head_candidates, fill_value=rel)
+
+        outs = []
+        for k, model in enumerate(models.models):
+            logits = model.decode(encoded_zs[k], eval_edge_index, eval_edge_type)
+            probs = torch.sigmoid(logits)
+            outs.append(probs)
+            
+        mean_pred = torch.stack(outs, dim=0).mean(dim=0)
+        
+        if models.calibration == "scalar" and models.use_calibration:
+            score = torch.logit(mean_pred) / models.temperature.to(device)
+        else:
+            score = mean_pred
+            
+        ranks.append(compute_rank(score))
+
+    # Calculate final metrics
+    ranks_t = torch.tensor(ranks, dtype=torch.float)
     scores = {
-        'mrr': (1. / torch.tensor(ranks, dtype=torch.float)).mean(),
-        'mean_rank': torch.tensor(ranks, dtype=torch.float).mean(),
-        'hits@1': (torch.tensor(ranks, dtype=torch.float) <= 1).float().mean(),
-        'hits@3': (torch.tensor(ranks, dtype=torch.float) <= 3).float().mean(),
-        'hits@10': (torch.tensor(ranks, dtype=torch.float) <= 10).float().mean(),
+        'mrr': (1. / ranks_t).mean().item(),
+        'mean_rank': ranks_t.mean().item(),
+        'hits@1': (ranks_t <= 1).float().mean().item(),
+        'hits@3': (ranks_t <= 3).float().mean().item(),
+        'hits@10': (ranks_t <= 10).float().mean().item(),
     }
 
     return scores
@@ -317,3 +350,4 @@ def compute_uncertainty(y_true, y_probs):
         'prob_pred': prob_pred
 
     }
+

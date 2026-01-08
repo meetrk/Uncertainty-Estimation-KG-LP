@@ -76,7 +76,7 @@ class EnsemblePipeline(BasePipeline):
                 self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
 
                 scores = self.test_uncertainty(
-                        self.model,
+                        self.ensemble,
                         self.config.get_section('calibration')['method'],
                         self.data.edge_index,
                         self.data.edge_type,
@@ -201,6 +201,7 @@ class EnsemblePipeline(BasePipeline):
             edge_type,
             test_edge_index,
             test_edge_type,
+            return_logits=return_logits,
             enable_grad=enable_grad
         )
         
@@ -211,6 +212,7 @@ class EnsemblePipeline(BasePipeline):
             edge_type,
             neg_edge_index,
             neg_edge_type,
+            return_logits=return_logits,
             enable_grad=enable_grad
         )
         
@@ -222,17 +224,22 @@ class EnsemblePipeline(BasePipeline):
             torch.zeros_like(neg_mean_pred)
         ])
         
-        # Apply isotonic regression if requested (for uncertainty quantification only)
         if apply_isotonic and hasattr(model, 'isotonic_regression_transform') and model.isotonic_regression_transform is not None:
             device = all_mean_pred.device
-            logits_np = all_mean_pred.cpu().numpy().flatten()
-            calibrated_logits_np = model.isotonic_regression_transform.predict(logits_np)
-            all_mean_pred = torch.tensor(calibrated_logits_np, dtype=torch.float32, device=device)
-        elif not return_logits:
-            all_mean_pred = torch.sigmoid(all_mean_pred)
+            
+            if return_logits:
+                input_data = all_mean_pred.detach().cpu().numpy().flatten()
+                calibrated_probs = model.isotonic_regression_transform.predict(input_data)
+                
+                return torch.tensor(calibrated_probs, dtype=torch.float32, device=device), labels
+            
+            else:
+                 input_data = all_mean_pred.detach().cpu().numpy().flatten()
+                 calibrated_probs = model.isotonic_regression_transform.predict(input_data)
+                 return torch.tensor(calibrated_probs, dtype=torch.float32, device=device), labels
 
         return all_mean_pred, labels
-
+    
     @torch.no_grad()
     def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type):
         """Standard inference with gradients disabled."""
@@ -250,9 +257,8 @@ class EnsemblePipeline(BasePipeline):
         # Check if isotonic regression calibration is available
         use_isotonic = (hasattr(model, 'isotonic_regression_transform') and 
                        model.isotonic_regression_transform is not None and
-                       hasattr(model, 'use_isotonic_calibration') and
-                       model.use_isotonic_calibration)
-        
+                       hasattr(model, 'use_calibration') and
+                       model.use_calibration)
         all_mean_pred, labels = self._inference_helper(
                 model,
                 edge_index,
@@ -282,11 +288,11 @@ class EnsemblePipeline(BasePipeline):
         self.load_checkpoint(checkpoint_path, load_optimizer=False)
         self.logger.info("Checkpoint loaded. Evaluating ensemble uncertainty on test set...")
 
-        scores = self.test_link_pred(
-            type=type,
-            model=self.ensemble,
-            valid_edge_index=self.data.valid_edge_index,
-            valid_edge_type=self.data.valid_edge_type)
+        # scores = self.test_link_pred(
+        #     type=type,
+        #     model=self.ensemble,
+        #     valid_edge_index=self.data.valid_edge_index,
+        #     valid_edge_type=self.data.valid_edge_type)
         
         scores = self.test_uncertainty(
             self.model,
@@ -304,11 +310,11 @@ class EnsemblePipeline(BasePipeline):
             lr=self.config.get_section('calibration').get('learning_rate', 0.01)
         )
 
-        scores = self.test_link_pred(
-            type=type,
-            model=self.ensemble,
-            valid_edge_index=self.data.valid_edge_index,
-            valid_edge_type=self.data.valid_edge_type)
+        # scores = self.test_link_pred(
+        #     type=type,
+        #     model=self.ensemble,
+        #     valid_edge_index=self.data.valid_edge_index,
+        #     valid_edge_type=self.data.valid_edge_type)
         
         scores = self.test_uncertainty(
             self.model,
@@ -384,6 +390,8 @@ class EnsemblePipeline(BasePipeline):
         
         for i, state_dict in enumerate(checkpoint['models']):
             self.ensemble.models[i].load_state_dict(state_dict, strict=False)
+            self.ensemble.models[i].eval()
+        self.ensemble.eval()
         
         if load_optimizer:
             for i, state_dict in enumerate(checkpoint['optimizers']):
@@ -471,200 +479,78 @@ class EnsemblePipeline(BasePipeline):
         return nll_loss
 
     def calibrate_input_dependent_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
-        """Calibrate input-dependent temperature network on validation set for ensemble.
-        
-        This method learns a small neural network that predicts per-query
-        temperature values T(h,r) for each query, allowing each model in the
-        ensemble to express uncertainty adaptively while preserving ranking.
-        
-        Args:
-            model: Ensemble model with multiple GAE models
-            max_iters: Maximum optimization iterations
-            lr: Learning rate for Adam optimizer
-            type_params: Additional parameters for calibration
-            
-        Returns:
-            dict: Final temperature statistics and loss
-
-        """
-
-        self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
-
-        stats = self._get_temperature_stats(
-                    model, 
-                    self.data.valid_edge_index, 
-                    self.data.valid_edge_type, 
-                    num_samples=100
-                )
-        self._log_temperature_stats(stats, prefix="  Sample ")
-        
-        # Enable input-dependent temperature for all models in the ensemble
-        temp_enabled = True
-        for member_model in model.models:
-            if hasattr(member_model.decoder, 'use_input_dependent_temp'):
-                member_model.decoder.use_input_dependent_temp = True
-            else:
-                self.logger.error(f"Model decoder does not support input-dependent temperature!")
-                temp_enabled = False
-                break
-        
-        if not temp_enabled:
-            return {}
-        
-        # Collect temperature parameters from all ensemble members
-        temp_params = []
-        for member_model in model.models:
-            for name, param in member_model.named_parameters():
-                if 'temp_network' in name or 'temperature' in name:
-                    param.requires_grad = True
-                    temp_params.append(param)
-                else:
-                    param.requires_grad = False
-        
-        if not temp_params:
-            self.logger.error("No temperature parameters found in ensemble!")
-            return {}
-        
-        self.logger.info(f"Collected {len(temp_params)} temperature parameters from {len(model.models)} models")
-        optimizer = torch.optim.Adam(temp_params, lr=lr)
-        
-        self.logger.info("="*60)
-        self.logger.info("Starting Input-Dependent Temperature Calibration")
-        self.logger.info(f"Parameters to optimize: {len(temp_params)}")
-        self.logger.info(f"Max iterations: {max_iters}, Learning rate: {lr}")
-        self.logger.info("="*60)
-
-        
-        # Training loop with early stopping
-        best_loss = float('inf')
-        patience, patience_counter = 5, 0
-        
-        for iteration in range(1, max_iters + 1):
-            # Optimization step
-            optimizer.zero_grad()
-            loss = self.compute_nll_loss(model, params=type_params)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(temp_params, max_norm=1.0)
-            optimizer.step()
-            
-            # Track best loss for early stopping
-            loss_val = loss.item()
-            if loss_val < best_loss:
-                best_loss = loss_val
-                patience_counter = 0
-            else:
-                patience_counter += 1
-            
-            # Periodic logging
-            if iteration % 10 == 0:
-                self.logger.info(f"Iter {iteration}/{max_iters}: NLL={loss_val:.4f}, Best={best_loss:.4f}")
-                
-                # Log sample temperature distribution
-                stats = self._get_temperature_stats(
-                    model, 
-                    self.data.valid_edge_index, 
-                    self.data.valid_edge_type, 
-                    num_samples=100
-                )
-                self._log_temperature_stats(stats, prefix="  Sample ")
-            
-            # Early stopping check
-            if patience_counter >= patience:
-                self.logger.info(f"Early stopping at iteration {iteration}")
-                break
-        
-        # Compute and log final statistics
-        final_stats = self._get_temperature_stats(
-            model,
-            self.data.valid_edge_index,
-            self.data.valid_edge_type
-        )
-        final_stats['final_loss'] = best_loss
-        
-        self.logger.info("="*60)
-        self.logger.info("Calibration Complete!")
-        self._log_temperature_stats(final_stats, prefix="Final ")
-        self.logger.info(f"Final NLL Loss: {best_loss:.4f}")
-        self.logger.info("="*60)
-        
-        # Unfreeze all parameters in all ensemble members
-        for member_model in model.models:
-            for param in member_model.parameters():
-                param.requires_grad = True
-        
-        return final_stats
+        pass
 
     def calibrate_scalar_temperature(self, model, max_iters=50, lr=0.01, type_params = None):
-        """Calibrate scalar temperature parameters on validation set for ensemble.
+        """Calibrate scalar temperature parameter on validation set for ensemble.
         
-        This is the traditional temperature scaling approach where each model
-        in the ensemble has its own scalar T that divides all logits uniformly.
+        This is the traditional temperature scaling approach where a single
+        scalar T divides all ensemble logits uniformly.
         
         Args:
-            model: Ensemble model with scalar temperature parameters
-            max_iters: Maximum LBFGS iterations
-            lr: Learning rate for LBFGS
+            model: Ensemble model with scalar temperature parameter
+            max_iters: Maximum optimization iterations
+            lr: Learning rate for optimizer
             type_params: Additional parameters for calibration
             
         Returns:
-            dict: Calibrated temperature values for each model
+            dict: Calibrated temperature value
         """
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
         
-        # Ensure input-dependent temperature is disabled for all models in ensemble
+        # Freeze all model parameters - only optimize temperature
         for member_model in model.models:
-            if hasattr(member_model.decoder, 'use_input_dependent_temp'):
-                member_model.decoder.use_input_dependent_temp = False
+            for param in member_model.parameters():
+                param.requires_grad = False
 
-        # Collect temperature parameters from all ensemble members
-        temp_params = []
-        initial_temps = []
-        for member_model in model.models:
-            for name, param in member_model.named_parameters():
-                if 'temperature' in name and 'temp_network' not in name:
-                    param.requires_grad = True
-                    temp_params.append(param)
-                    initial_temps.append(param.item())
-                else:
-                    param.requires_grad = False
-        
-        if not temp_params:
-            self.logger.error("No temperature parameters found in ensemble!")
-            return {}
+        # Enable calibration mode and make temperature trainable
+        model.use_calibration = True
+        model.temperature.requires_grad = True
+        initial_temp = model.temperature.item()
         
         self.logger.info("="*60)
         self.logger.info("Starting Scalar Temperature Calibration for Ensemble")
         self.logger.info(f"Number of models: {len(model.models)}")
-        self.logger.info(f"Initial temperatures: {initial_temps}")
+        self.logger.info(f"Initial temperature: {initial_temp:.4f}")
         self.logger.info("="*60)
         
-        # Use Adam optimizer for ensemble (LBFGS can be unstable with multiple parameters)
-        optimizer = torch.optim.Adam(temp_params, lr=lr)
+        # Use Adam optimizer for temperature calibration
+        optimizer = torch.optim.Adam([model.temperature], lr=lr)
         
         # Training loop with early stopping
         best_loss = float('inf')
+        best_temp = initial_temp
         patience, patience_counter = 5, 0
         
-        for iteration in range(1, max_iters + 1):
+        iterations = tqdm(range(1, max_iters + 1), desc="Calibrating Temperature")
+        for iteration in iterations:
             optimizer.zero_grad()
             loss = self.compute_nll_loss(model, params=type_params)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(temp_params, max_norm=1.0)
+            
+            # Clip gradients to prevent instability
+            torch.nn.utils.clip_grad_norm_([model.temperature], max_norm=1.0)
             optimizer.step()
             
-            # Track best loss for early stopping
+            # Constrain temperature to reasonable range [0.1, 10.0]
+            with torch.no_grad():
+                model.temperature.clamp_(0.1, 10.0)
+            
+            # Track best loss and temperature
             loss_val = loss.item()
+            current_temp = model.temperature.item()
+            
             if loss_val < best_loss:
                 best_loss = loss_val
+                best_temp = current_temp
                 patience_counter = 0
             else:
                 patience_counter += 1
             
             if iteration % 10 == 0:
-                current_temps = [param.item() for param in temp_params]
                 self.logger.info(
                     f"Iter {iteration}/{max_iters}: "
-                    f"NLL={loss_val:.4f}, Best={best_loss:.4f}, T={current_temps}"
+                    f"NLL={loss_val:.4f}, Best={best_loss:.4f}, T={current_temp:.4f}, Best_T={best_temp:.4f}"
                 )
             
             # Early stopping check
@@ -672,21 +558,28 @@ class EnsemblePipeline(BasePipeline):
                 self.logger.info(f"Early stopping at iteration {iteration}")
                 break
         
-        final_temps = [param.item() for param in temp_params]
+        # Set to best temperature found
+        with torch.no_grad():
+            model.temperature.data = torch.tensor([best_temp], device=model.temperature.device)
+        
+        final_temp = model.temperature.item()
         
         self.logger.info("="*60)
         self.logger.info("Calibration Complete!")
-        self.logger.info(f"Final temperatures: {final_temps}")
-        self.logger.info(f"Temperature changes: {[f'{final-init:+.4f}' for final, init in zip(final_temps, initial_temps)]}")
-        self.logger.info(f"Final NLL Loss: {best_loss:.4f}")
+        self.logger.info(f"Final temperature: {final_temp:.4f}")
+        self.logger.info(f"Temperature change: {final_temp - initial_temp:+.4f}")
+        self.logger.info(f"Best NLL Loss: {best_loss:.4f}")
         self.logger.info("="*60)
         
-        # Unfreeze all parameters in all ensemble members
+        # Unfreeze all parameters in ensemble members
         for member_model in model.models:
             for param in member_model.parameters():
                 param.requires_grad = True
         
-        return {f'model_{i}_temp': t for i, t in enumerate(final_temps)}
+        # Keep temperature as non-trainable after calibration
+        model.temperature.requires_grad = False
+        
+        return {'temperature': final_temp, 'best_nll': best_loss}
     
     def calibrate_isotonic_regression(self, model):
         """Calibrate using isotonic regression on validation set for ensemble.
