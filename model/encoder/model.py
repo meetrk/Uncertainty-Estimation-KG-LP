@@ -32,6 +32,7 @@ class RGCN(nn.Module):
         # Entity embeddings (encoder)
         self.entity_embedding = nn.Parameter(torch.FloatTensor(num_nodes, self.embedding_dim))
         self.entity_embedding_bias = nn.Parameter(torch.zeros(1, self.embedding_dim))
+        self.bn1 = nn.BatchNorm1d(self.hidden_layer_size)  
         
         # RGCN layers
         # self.conv1 = RGCNLayer(
@@ -48,7 +49,9 @@ class RGCN(nn.Module):
 
     def forward(self, edge_index, edge_type):
         x = self.entity_embedding + self.entity_embedding_bias
-        x = self.conv1(x, edge_index, edge_type).relu_()
+        x = self.conv1(x, edge_index, edge_type)
+        x = self.bn1(x)  
+        x = x.relu_()
         dropout = self.training or self.mc_dropout
         x = F.dropout(x, p=self.dropout_ratio, training=dropout)
         x = self.conv2(x, edge_index, edge_type)
