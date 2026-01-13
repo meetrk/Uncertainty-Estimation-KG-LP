@@ -45,7 +45,7 @@ class RelLinkPredDataset(InMemoryDataset):
     urls = {
         'FB15k-237': ('https://raw.githubusercontent.com/MichSchli/'
                       'RelationPrediction/master/data/FB-Toutanova'),
-        'WN18RR': ('https://raw.githubusercontent.com/meetrk/Uncertainty-Estimation-KG-LP/refs/heads/main/wn18rr')
+        'WN18RR': ('https://raw.githubusercontent.com/meetrk/thesis-dataset/refs/heads/main/wn18rr')
     }
 
     def __init__(
