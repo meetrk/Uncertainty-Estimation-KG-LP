@@ -133,17 +133,17 @@ class Pipeline(BasePipeline):
         scores = self.test_link_pred(
             type=type,
             model=self.model,
-            valid_edge_index=self.data.valid_edge_index,
-            valid_edge_type=self.data.valid_edge_type,
+            valid_edge_index=self.data.test_edge_index,
+            valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
-        
+
         scores = self.test_uncertainty(
             self.model,
             type,
             self.data.edge_index,
             self.data.edge_type,
-            self.data.valid_edge_index,
-            self.data.valid_edge_type,
+            self.data.test_edge_index,
+            self.data.test_edge_type,
             uncertainty_samples
             )
 
@@ -317,7 +317,7 @@ class Pipeline(BasePipeline):
     @torch.no_grad()
     def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples=None):
 
-       
+        
         if method == 'mc_dropout':
             assert uncertainty_samples is not None, "MC Dropout requires specifying number of samples."
             scores, labels = self.inference_mc(
@@ -340,8 +340,9 @@ class Pipeline(BasePipeline):
         else:
             raise ValueError(f"Unsupported uncertainty estimation method: {method}")
 
-        self.logger.info(f"Brier Score: {val_scores['brier_score']}")
-        self.logger.info(f"ECE: {val_scores['ece']}")
+        self.logger.info(f"Brier Score: {val_scores['brier_score']:.4f}")
+        self.logger.info(f"ECE: {val_scores['ece']:.4f}")
+        self.logger.info(f"ACE: {val_scores['ace']:.4f}")
         self.logger.info(f"Probability True: {val_scores['prob_true']}")
         self.logger.info(f"Probability Predicted: {val_scores['prob_pred']}")
 

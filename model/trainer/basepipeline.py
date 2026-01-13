@@ -157,7 +157,6 @@ class BasePipeline:
             'embedding_dim': self.model_config['encoder']['embedding_dim'],
             'hidden_layer_size': self.model_config['encoder']['hidden_layer_size'],
             'num_bases': self.model_config['encoder']['num_bases'],
-            'dropout_rate': self.model_config['encoder']['dropout_rate'],
             'postive_label_smoothing': self.train_config.get('label_smoothing', {}).get('positive', 0.0),
             'negative_label_smoothing': self.train_config.get('label_smoothing', {}).get('negative', 0.0),
             # 'sampling_method': self.train_config['sampling']['method']
@@ -218,4 +217,16 @@ class BasePipeline:
         """Cleanup TensorBoard writer when pipeline is destroyed."""
         if hasattr(self, 'writer'):
             self.writer.close()
+
+    def _log_temperature_stats1(self, model):
+        """Helper to log what the network is predicting."""
+        with torch.no_grad():
+            # Sample a few edges from validation
+            idx = self.data.valid_edge_index[:, :100]
+            types = self.data.valid_edge_type[:100]
+            temps = model.compute_input_dependent_temperature(idx, types)
+            self.logger.info(f"  [Temp Stats] Mean: {temps.mean():.3f} | Min: {temps.min():.3f} | Max: {temps.max():.3f}")
+
+
+
 

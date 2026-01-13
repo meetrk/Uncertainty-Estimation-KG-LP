@@ -224,19 +224,22 @@ class EnsemblePipeline(BasePipeline):
             torch.zeros_like(neg_mean_pred)
         ])
         
+    
         if apply_isotonic and hasattr(model, 'isotonic_regression_transform') and model.isotonic_regression_transform is not None:
+            if return_logits:
+                all_mean_pred = torch.sigmoid(all_mean_pred)
+            
             device = all_mean_pred.device
+           
+            preds_np = all_mean_pred.cpu().numpy().flatten()
+           
+            calibrated_preds_np = model.isotonic_regression_transform.predict(preds_np)
+            all_mean_pred = torch.tensor(calibrated_preds_np, dtype=torch.float32, device=device).reshape(all_mean_pred.shape)
             
             if return_logits:
-                input_data = all_mean_pred.detach().cpu().numpy().flatten()
-                calibrated_probs = model.isotonic_regression_transform.predict(input_data)
-                
-                return torch.tensor(calibrated_probs, dtype=torch.float32, device=device), labels
-            
-            else:
-                 input_data = all_mean_pred.detach().cpu().numpy().flatten()
-                 calibrated_probs = model.isotonic_regression_transform.predict(input_data)
-                 return torch.tensor(calibrated_probs, dtype=torch.float32, device=device), labels
+                eps = 1e-6
+                all_mean_pred = torch.clamp(all_mean_pred, min=eps, max=1-eps)
+                all_mean_pred = torch.logit(all_mean_pred)
 
         return all_mean_pred, labels
     
@@ -253,12 +256,12 @@ class EnsemblePipeline(BasePipeline):
         
         Returns uncertainty metrics: Brier score, ECE, etc.
         """
-        
-        # Check if isotonic regression calibration is available
+        # Check if isotonic regression should be applied
         use_isotonic = (hasattr(model, 'isotonic_regression_transform') and 
                        model.isotonic_regression_transform is not None and
                        hasattr(model, 'use_calibration') and
                        model.use_calibration)
+        
         all_mean_pred, labels = self._inference_helper(
                 model,
                 edge_index,
@@ -278,6 +281,7 @@ class EnsemblePipeline(BasePipeline):
     
         self.logger.info(f"Ensemble Uncertainty - Brier Score: {scores['brier_score']:.4f}")
         self.logger.info(f"Ensemble Uncertainty - ECE: {scores['ece']:.4f}")
+        self.logger.info(f"Ensemble Uncertainty - ACE: {scores['ace']:.4f}")
         self.logger.info(f"Probability True: {scores['prob_true']}")
         self.logger.info(f"Probability Predicted: {scores['prob_pred']}")
 
@@ -287,12 +291,12 @@ class EnsemblePipeline(BasePipeline):
         """Load ensemble pipeline from checkpoint."""
         self.load_checkpoint(checkpoint_path, load_optimizer=False)
         self.logger.info("Checkpoint loaded. Evaluating ensemble uncertainty on test set...")
-
-        # scores = self.test_link_pred(
-        #     type=type,
-        #     model=self.ensemble,
-        #     valid_edge_index=self.data.valid_edge_index,
-        #     valid_edge_type=self.data.valid_edge_type)
+        self.logger.info(f"Calibration applied: {self.ensemble.use_calibration}")
+        scores = self.test_link_pred(
+            type=type,
+            model=self.ensemble,
+            valid_edge_index=self.data.valid_edge_index,
+            valid_edge_type=self.data.valid_edge_type)
         
         scores = self.test_uncertainty(
             self.model,
@@ -310,19 +314,19 @@ class EnsemblePipeline(BasePipeline):
             lr=self.config.get_section('calibration').get('learning_rate', 0.01)
         )
 
-        # scores = self.test_link_pred(
-        #     type=type,
-        #     model=self.ensemble,
-        #     valid_edge_index=self.data.valid_edge_index,
-        #     valid_edge_type=self.data.valid_edge_type)
+        scores = self.test_link_pred(
+            type=type,
+            model=self.ensemble,
+            valid_edge_index=self.data.valid_edge_index,
+            valid_edge_type=self.data.valid_edge_type)
         
         scores = self.test_uncertainty(
             self.model,
             type,
             self.data.edge_index,
             self.data.edge_type,
-            self.data.test_edge_index,
-            self.data.test_edge_type,
+            self.data.valid_edge_index,
+            self.data.valid_edge_type,
             )
         if save:
             self.save_checkpoint(epoch=0, name=f'calibrated_{Path(checkpoint_path).name}')
@@ -465,7 +469,7 @@ class EnsemblePipeline(BasePipeline):
             NLL loss value
         """
         logits, labels = self._inference_helper(
-                model,
+                model, 
                 self.data.edge_index,
                 self.data.edge_type,
                 self.data.valid_edge_index,
@@ -479,7 +483,44 @@ class EnsemblePipeline(BasePipeline):
         return nll_loss
 
     def calibrate_input_dependent_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
-        pass
+        
+        self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
+
+
+        stats = self._get_temperature_stats(
+                    model, 
+                    self.data.valid_edge_index, 
+                    self.data.valid_edge_type, 
+                    num_samples=100
+                )
+        self._log_temperature_stats(stats, prefix="  Sample ")
+        
+        model.use_calibration = True
+        
+        for i, member_model in enumerate(model.models):
+            # Pass encoder function instead of pre-computed embeddings
+            encoder_fn = lambda edge_idx, edge_typ: member_model.encode(edge_idx, edge_typ)
+            best_loss = member_model.decoder.calibrate(
+                encoder_fn,
+                self.data.edge_index,
+                self.data.edge_type,
+                self.data.valid_edge_index,
+                self.data.valid_edge_type
+            )
+            self.logger.info(f"Input-dependent temperature network calibrated for model {i+1}/{model.num_models} ")
+            self.logger.info(f"Best NLL Loss for model {i+1}: {best_loss:.4f}")
+        
+    
+        # Compute and log final statistics
+        final_stats = self._get_temperature_stats(
+            model,
+            self.data.valid_edge_index,
+            self.data.valid_edge_type
+        )
+        self._log_temperature_stats(final_stats, prefix="  Final ")
+        return final_stats
+
+
 
     def calibrate_scalar_temperature(self, model, max_iters=50, lr=0.01, type_params = None):
         """Calibrate scalar temperature parameter on validation set for ensemble.
@@ -529,7 +570,7 @@ class EnsemblePipeline(BasePipeline):
             loss.backward()
             
             # Clip gradients to prevent instability
-            torch.nn.utils.clip_grad_norm_([model.temperature], max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_([model.temperature], max_norm=10.0)
             optimizer.step()
             
             # Constrain temperature to reasonable range [0.1, 10.0]
@@ -601,31 +642,27 @@ class EnsemblePipeline(BasePipeline):
         # Get ensemble predictions (raw logits) and labels
         model.eval()
         with torch.no_grad():
-            logits, labels = self._inference_helper(
+            probs, labels = self._inference_helper(
                 model,
                 self.data.edge_index,
                 self.data.edge_type,
                 self.data.valid_edge_index,
                 self.data.valid_edge_type,
-                return_logits=True  # Get raw ensemble mean logits
+                return_logits=False  
             )
-        
-        logits_np = logits.cpu().numpy().flatten()
+        probs_np = probs.cpu().numpy().flatten()
         labels_np = labels.cpu().numpy().flatten()
 
         # Fit isotonic regression on ensemble mean predictions
         iso_reg = IsotonicRegression(out_of_bounds='clip')
-        iso_reg.fit(logits_np, labels_np)
+        iso_reg.fit(probs_np, labels_np)
 
         self.logger.info("Isotonic Regression model fitted on ensemble predictions.")
         
-        # Store the isotonic regression transform in the ensemble
-        # This will be applied to the ensemble mean predictions
+ 
         model.isotonic_regression_transform = iso_reg
-        model.use_isotonic_calibration = True
+        model.use_calibration = True
         
         self.logger.info("Calibration Complete!")
 
         return {"isotonic_model": iso_reg}
-
-

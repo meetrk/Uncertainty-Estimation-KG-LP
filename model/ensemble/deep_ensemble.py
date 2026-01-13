@@ -49,7 +49,9 @@ class DeepEnsemble(nn.Module):
         self.models = nn.ModuleList()
         for i in range(num_models):
             encoder = base_encoder_class(**encoder_args)
-            decoder = base_decoder_class(**decoder_args)
+            # Pass calibration to decoder for individual decoder-level calibration
+            decoder_args_with_calibration = {**decoder_args, 'calibration': calibration}
+            decoder = base_decoder_class(**decoder_args_with_calibration)
             model = GAE(encoder=encoder, decoder=decoder)
             self.models.append(model)
         
@@ -61,9 +63,9 @@ class DeepEnsemble(nn.Module):
 
         elif self.calibration == "input_dependent":
             self.temp_network = torch.nn.Sequential(
-                torch.nn.Linear(2 * encoder_args['hidden_channels'], encoder_args['hidden_channels'] // 2),
+                torch.nn.Linear(2 * encoder_args['model_config']['encoder']['embedding_dim'], encoder_args['model_config']['encoder']['embedding_dim'] // 2),
                 torch.nn.ReLU(),
-                torch.nn.Linear(encoder_args['hidden_channels'] // 2, 1),
+                torch.nn.Linear(encoder_args['model_config']['encoder']['embedding_dim'] // 2, 1),
                 torch.nn.Softplus()  
             )
             self.temp_network.to(device)
@@ -72,7 +74,7 @@ class DeepEnsemble(nn.Module):
                 param.data.normal_(0, 0.01)
         elif self.calibration == "isotonic_regression":
             self.isotonic_regression_transform = None  # To be set during calibration
-
+            self.use_calibration = False
         elif self.calibration == "none":
             self.temperature = Parameter(torch.ones(1), requires_grad=False)
             self.temperature.to(device)
@@ -136,45 +138,7 @@ class DeepEnsemble(nn.Module):
         
         return predictions
     
-    def predict_with_uncertainty(
-        self, 
-        edge_index, 
-        edge_type, 
-        pred_edge_index, 
-        pred_edge_type,
-        return_logits: bool = False,
-        enable_grad: bool = False  
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Make predictions with uncertainty estimates."""
-        self.eval()
-        if enable_grad:
-            predictions = self.forward_ensemble(
-                edge_index, edge_type, pred_edge_index, pred_edge_type
-            )
-        else:
-            with torch.no_grad():
-                predictions = self.forward_ensemble(
-                    edge_index, edge_type, pred_edge_index, pred_edge_type
-                )
-        
-        # Rest stays the same
-        preds_stack = torch.stack(predictions, dim=0)
-        mean_pred = preds_stack.mean(dim=0)
-        std_pred = preds_stack.std(dim=0)
-        eps = 1e-6
-        mean_prob_clamped = torch.clamp(mean_pred, min=eps, max=1-eps)
-        ensemble_logit = torch.logit(mean_prob_clamped)
 
-        if self.calibration == "scalar" and self.use_calibration:
-            calibrated_logit = ensemble_logit / self.temperature.to(ensemble_logit.device)
-        else:
-            calibrated_logit = ensemble_logit
-
-        if return_logits:
-            return calibrated_logit, std_pred
-        else:
-            return torch.sigmoid(calibrated_logit), std_pred        
-    
     def get_optimizers(self, lr: float, weight_decay: float = 0.0):
         """
         Create separate optimizers for each ensemble member.
@@ -213,3 +177,145 @@ class DeepEnsemble(nn.Module):
         
         for i, state_dict in enumerate(checkpoint['models']):
             self.models[i].load_state_dict(state_dict)
+
+    def inference_optimised(self, encoded_zs: list, eval_edge_index, eval_edge_type):
+        """
+        Optimized inference using pre-computed embeddings.
+        
+        Args:
+            encoded_zs: List of pre-computed node embeddings from each ensemble model
+            eval_edge_index: Edge indices to evaluate
+            eval_edge_type: Edge types to evaluate
+            
+        Returns:
+            Calibrated prediction scores (Logits if scalar/input-dependent, Probabilities if isotonic/none)
+        """
+
+        outs = []
+        # 1. Collect Relational Embeddings needed for PTS later
+        all_rel_embs = [] 
+
+        for k, model in enumerate(self.models):
+            logits = model.decode(encoded_zs[k], eval_edge_index, eval_edge_type)
+            probs = torch.sigmoid(logits)
+            outs.append(probs)
+            
+            # Collect relation embeddings for this model
+            # Assuming model.decoder.rel_emb exists and is the embedding matrix
+            if self.calibration == "input_dependent" and self.use_calibration:
+                all_rel_embs.append(model.decoder.rel_emb[eval_edge_type])
+            
+        # Aggregation
+        mean_pred = torch.stack(outs, dim=0).mean(dim=0)
+        
+        # Prepare for calibration (convert prob -> logit)
+        eps = 1e-6
+        mean_pred_clamped = torch.clamp(mean_pred, min=eps, max=1-eps)
+        ensemble_logit = torch.logit(mean_pred_clamped)
+        
+        # Calibration Logic
+        if self.use_calibration:
+            if self.calibration == "scalar":
+                score = ensemble_logit / self.temperature.to(self.device)
+                
+            elif self.calibration == "input_dependent":
+                
+                return mean_pred
+                
+            elif self.calibration == "isotonic_regression":
+                # Apply isotonic regression to PROBABILITIES
+                device = mean_pred.device
+                preds_np = mean_pred.cpu().numpy().flatten()
+                calibrated_preds_np = self.isotonic_regression_transform.predict(preds_np)
+                score = torch.tensor(calibrated_preds_np, dtype=torch.float32, device=device).reshape(mean_pred.shape)
+            else:
+                score = mean_pred # Return probabilities if no calib match
+        else:
+            score = mean_pred # Return probabilities if calib disabled
+            
+        return score
+    
+
+    def compute_input_dependent_temperature(self, edge_index, edge_type):
+        """
+        Computes temperature based on the MEAN embeddings of the ensemble.
+        
+        Args:
+            edge_index: The edge indices (2, num_edges)
+            edge_type: The edge types (num_edges)
+        """
+        # 1. Gather embeddings from all models
+        all_head_embs = []
+        all_rel_embs = []
+        
+        for model in self.models:
+            # Get node embeddings
+            z = model.encode(edge_index, edge_type)
+            head_emb = z[edge_index[0]]
+            
+            # Get relation embeddings (assuming DistMult/standard decoder structure)
+            rel_emb = model.decoder.rel_emb[edge_type]
+            
+            all_head_embs.append(head_emb)
+            all_rel_embs.append(rel_emb)
+
+        # 2. Compute the "Consensus Embedding" (Mean)
+        # Shape: [num_edges, hidden_channels]
+        mean_head_emb = torch.stack(all_head_embs).mean(dim=0) 
+        mean_rel_emb = torch.stack(all_rel_embs).mean(dim=0)
+        
+        # 3. Concatenate to create query features: [h; r]
+        query_emb = torch.cat([mean_head_emb, mean_rel_emb], dim=-1)
+        
+        # 4. Predict Temperature
+        # Add epsilon to ensure positivity
+        temperature = self.temp_network(query_emb) + 0.01 
+        
+        return temperature
+
+    def predict_with_uncertainty(
+        self, 
+        edge_index, 
+        edge_type, 
+        pred_edge_index, 
+        pred_edge_type,
+        return_logits: bool = False,
+        enable_grad: bool = False  
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        self.eval()
+        # Enable grad only if explicitly requested (e.g., during calibration training)
+        context = torch.enable_grad() if enable_grad else torch.no_grad()
+        
+        with context:
+            # 1. Get Raw Ensemble Predictions
+            predictions = self.forward_ensemble(
+                edge_index, edge_type, pred_edge_index, pred_edge_type
+            )
+            
+            preds_stack = torch.stack(predictions, dim=0)
+            mean_prob = preds_stack.mean(dim=0)
+            std_pred = preds_stack.std(dim=0)
+            
+            # 2. Convert to Ensemble Logits
+            eps = 1e-6
+            mean_prob_clamped = torch.clamp(mean_prob, min=eps, max=1-eps)
+            ensemble_logit = torch.logit(mean_prob_clamped)
+
+            # 3. Apply Calibration (Scalar or Input-Dependent)
+            if self.use_calibration:
+                if self.calibration == "scalar":
+                    calibrated_logit = ensemble_logit / self.temperature.to(ensemble_logit.device)
+                    
+                elif self.calibration == "input_dependent":
+                    temps = self.compute_input_dependent_temperature(pred_edge_index, pred_edge_type)
+                    calibrated_logit = ensemble_logit / temps.view(-1)
+                else:
+                    calibrated_logit = ensemble_logit
+            else:
+                calibrated_logit = ensemble_logit
+
+            if return_logits:
+                return calibrated_logit, std_pred
+            else:
+                return torch.sigmoid(calibrated_logit), std_pred

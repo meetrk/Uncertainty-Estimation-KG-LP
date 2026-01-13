@@ -8,6 +8,7 @@ from tqdm import tqdm
 from torchmetrics.classification.calibration_error import BinaryCalibrationError
 from sklearn.metrics import brier_score_loss
 from model.ensemble.deep_ensemble import DeepEnsemble
+from netcal.metrics import ACE
 from sklearn.calibration import calibration_curve
 
 import matplotlib.pyplot as plt
@@ -141,7 +142,6 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
     head_filter, tail_filter = create_filter_dicts(data)
     
     ranks = []
-    models.use_calibration = True 
     
     # Pre-allocate a mask tensor to reuse memory
     mask_container = torch.ones(num_nodes, dtype=torch.bool, device=device)
@@ -154,6 +154,7 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
         dst = edge_index[1, i].item()
         rel = edge_type[i].item()
 
+        # ========== Tail Prediction ==========
         true_tails = tail_filter.get((src, rel), set())
         
         mask_container.fill_(True)
@@ -162,7 +163,6 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
             indices = torch.tensor(list(true_tails), device=device)
             mask_container[indices] = False
             
-        
         # Mask out the target from the general candidates to avoid duplication
         mask_container[dst] = False
         
@@ -175,25 +175,11 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
         head_candidates = torch.full_like(tail_candidates, fill_value=src)
         eval_edge_index = torch.stack([head_candidates, tail_candidates], dim=0)
         eval_edge_type = torch.full_like(tail_candidates, fill_value=rel)
-
-        outs = []
-        for k, model in enumerate(models.models):
-        
-            logits = model.decode(encoded_zs[k], eval_edge_index, eval_edge_type)
-            probs = torch.sigmoid(logits)
-            outs.append(probs)
-            
-        # 4. Aggregation & Calibration
-        mean_pred = torch.stack(outs, dim=0).mean(dim=0)
-        
-        if models.calibration == "scalar" and models.use_calibration:
-            score = torch.logit(mean_pred) / models.temperature.to(device)
-        else:
-            score = mean_pred
-            
+        # Use optimized inference
+        score = models.inference_optimised(encoded_zs, eval_edge_index, eval_edge_type)
         ranks.append(compute_rank(score))
 
-        
+        # ========== Head Prediction ==========
         true_heads = head_filter.get((dst, rel), set())
         
         mask_container.fill_(True)
@@ -210,19 +196,8 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
         eval_edge_index = torch.stack([head_candidates, tail_candidates], dim=0)
         eval_edge_type = torch.full_like(head_candidates, fill_value=rel)
 
-        outs = []
-        for k, model in enumerate(models.models):
-            logits = model.decode(encoded_zs[k], eval_edge_index, eval_edge_type)
-            probs = torch.sigmoid(logits)
-            outs.append(probs)
-            
-        mean_pred = torch.stack(outs, dim=0).mean(dim=0)
-        
-        if models.calibration == "scalar" and models.use_calibration:
-            score = torch.logit(mean_pred) / models.temperature.to(device)
-        else:
-            score = mean_pred
-            
+        # Use optimized inference
+        score = models.inference_optimised(encoded_zs, eval_edge_index, eval_edge_type)
         ranks.append(compute_rank(score))
 
     # Calculate final metrics
@@ -334,6 +309,9 @@ def compute_uncertainty(y_true, y_probs):
     # norm='l1' ensures we calculate standard ECE (not RMSCE).
     ece_metric = BinaryCalibrationError(n_bins=10, norm='l1')
     
+    ace = ACE(bins=15)
+    score = ace.measure(y_probs.numpy(), y_true.numpy())
+    print(f"ACE Score: {score}")
     # 3. Update Metrics
     ece_metric.update(y_probs, y_true)
    
@@ -346,6 +324,7 @@ def compute_uncertainty(y_true, y_probs):
     return {
         'brier_score': brier_score,
         'ece': ece_score,
+        'ace': score,
         'prob_true': prob_true,
         'prob_pred': prob_pred
 

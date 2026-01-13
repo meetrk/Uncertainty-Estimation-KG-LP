@@ -75,9 +75,9 @@ class KGEModel(torch.nn.Module):
         if not self.use_input_dependent_temp:
             # Return fixed temperature of 1.0
             return torch.ones(head_emb.size(0), 1, device=head_emb.device)
-        
+
         # Concatenate head and relation embeddings
-        query_emb = torch.cat([head_emb, rel_emb], dim=-1)  # [batch_size, 2*hidden_channels]
+        query_emb = torch.cat([head_emb, rel_emb], dim=-1)  # [batch_size, 2 * hidden_channels]
         
         # Predict temperature (add small epsilon to avoid division by zero)
         temperature = self.temp_network(query_emb) + 0.01  # [batch_size, 1]
