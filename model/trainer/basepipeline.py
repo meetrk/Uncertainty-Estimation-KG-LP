@@ -76,6 +76,12 @@ class BasePipeline:
         self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
         self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
         
+        self.logger.info(f"Brier Score: {scores['brier_score']:.4f}")
+        self.logger.info(f"ECE: {scores['ece']:.4f}")
+        self.logger.info(f"ACE: {scores['ace']:.4f}")
+        self.logger.info(f"Probability True: {scores['prob_true']}")
+        self.logger.info(f"Probability Predicted: {scores['prob_pred']}")
+        
         return scores
 
     def train(self):
@@ -180,8 +186,13 @@ class BasePipeline:
             'training_history': self.training_history,
             'config': self.config
         }
+        if self.train_config['label_smoothing']['positive'] < 1 or self.train_config['label_smoothing']['negative'] > 0:
+            label_smoothing = True
+        else:
+            label_smoothing = False
+        negative_sampling = self.train_config['sampling']['negative_sampling_ratio']
         if name is None:
-            name = f'{self.config.get_section("dataset")["name"]}_checkpoint_epoch_{epoch}.pth'
+            name = f'{self.config.get_section("dataset")["name"]}_checkpoint_label_{label_smoothing}_negative_sampling_{negative_sampling}_epoch_{epoch}.pth'
         checkpoint_dir = Path('checkpoints')
         checkpoint_dir.mkdir(exist_ok=True)
 

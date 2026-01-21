@@ -79,20 +79,12 @@ class DistMult(KGEModel):
             scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  
             scores = scores / self.temperature 
             
-            return scores
-        elif self.calibration == "isotonic_regression":
-
-            logits = torch.sum(head * rel * tail, dim=1, keepdim=True)
-            if self.use_calibration and self.isotonic_regression_transform is not None:
-                probab = torch.sigmoid(logits)
-                scores = self.isotonic_regression_transform.predict(probab.cpu().numpy())
-                scores = torch.from_numpy(scores).to(logits.device).unsqueeze(-1)
-                return scores.squeeze(-1)
-            else:
-                return logits.squeeze(-1)
+            return scores.squeeze(-1)
         else:
-            scores  = torch.sum(head * rel * tail, dim=1, keepdim=True)
-            return scores
+            # For isotonic_regression and default cases, always return raw logits
+            # Calibration will be applied during inference, not in forward pass
+            scores = torch.sum(head * rel * tail, dim=1, keepdim=True)
+            return scores.squeeze(-1)
 
     def compute_nll_loss(self, X, edge_index, edge_type):
         pos_scores = self.forward(X, edge_index, edge_type)

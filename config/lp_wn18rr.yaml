@@ -23,26 +23,25 @@ ensemble:
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 1
+    negative_sampling_ratio: 5
     edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
     weight_decay: 0.0001
   evaluation_frequency: 100
-  save_frequency: 50
   early stopping:
     enabled: true
     patience: 10
     delta: 0.001
-  load_model: true
+  load_model: false
   save_model: true
-  checkpoint_path: ./checkpoints/WN18RR_checkpoint_best_model_label_smoothing.pth
+  checkpoint_path: ./checkpoints/WN18RR_ensemble_checkpoint_best_model_scalar.pth
   label_smoothing: 
-    positive: 0.9 
-    negative: 0.05
+    positive: 1
+    negative: 0
 calibration:
   type: standard
   mc_samples: 5
-  method: isotonic_regression
-  max_iters: 20
+  method: scalar
+  max_iters: 100
   learning_rate: 0.01

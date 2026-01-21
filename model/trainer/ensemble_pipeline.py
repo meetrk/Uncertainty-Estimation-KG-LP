@@ -206,7 +206,7 @@ class EnsemblePipeline(BasePipeline):
         )
         
         # Also get negative samples for evaluation
-        neg_edge_index, neg_edge_type = negative_sampling( test_edge_index, test_edge_type,self.data.num_nodes, 1)
+        neg_edge_index, neg_edge_type = negative_sampling( test_edge_index, test_edge_type,self.data.num_nodes, 10)
         neg_mean_pred, neg_std_pred = model.predict_with_uncertainty(
             edge_index,
             edge_type,
@@ -292,20 +292,14 @@ class EnsemblePipeline(BasePipeline):
         self.load_checkpoint(checkpoint_path, load_optimizer=False)
         self.logger.info("Checkpoint loaded. Evaluating ensemble uncertainty on test set...")
         self.logger.info(f"Calibration applied: {self.ensemble.use_calibration}")
+
+        assert type == 'ensemble', "Loaded model is not an ensemble."
+
         scores = self.test_link_pred(
             type=type,
             model=self.ensemble,
             valid_edge_index=self.data.valid_edge_index,
             valid_edge_type=self.data.valid_edge_type)
-        
-        scores = self.test_uncertainty(
-            self.model,
-            type,
-            self.data.edge_index,
-            self.data.edge_type,
-            self.data.valid_edge_index,
-            self.data.valid_edge_type,
-            )
         
         calibration_results = self.calibrate_pipeline(
             method=self.config.get_section('calibration')['method'],
@@ -320,14 +314,6 @@ class EnsemblePipeline(BasePipeline):
             valid_edge_index=self.data.valid_edge_index,
             valid_edge_type=self.data.valid_edge_type)
         
-        scores = self.test_uncertainty(
-            self.model,
-            type,
-            self.data.edge_index,
-            self.data.edge_type,
-            self.data.valid_edge_index,
-            self.data.valid_edge_type,
-            )
         if save:
             self.save_checkpoint(epoch=0, name=f'calibrated_{Path(checkpoint_path).name}')
 

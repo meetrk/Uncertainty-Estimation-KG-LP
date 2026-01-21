@@ -10,19 +10,10 @@ from sklearn.metrics import brier_score_loss
 from model.ensemble.deep_ensemble import DeepEnsemble
 from netcal.metrics import ACE
 from sklearn.calibration import calibration_curve
+import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
 
-
-
-def mean_reciprocal_rank(ranks: List[int]) -> float:
-    """Calculate Mean Reciprocal Rank (MRR)."""
-    return float(np.mean([1.0 / rank for rank in ranks]))
-
-
-def hits_at_k(ranks: List[int], k: int) -> float:
-    """Calculate Hits@K metric."""
-    return float(np.mean([1.0 if rank <= k else 0.0 for rank in ranks]))
 
 def create_filter_dicts(data):
     """
@@ -34,8 +25,6 @@ def create_filter_dicts(data):
     head_filter = {}
     tail_filter = {}
 
-    # Combine all edges (train, val, test)
-    # Move to CPU list for faster Python dictionary insertion
     edges = [
         (data.train_edge_index, data.train_edge_type),
         (data.valid_edge_index, data.valid_edge_type),
@@ -68,64 +57,6 @@ def compute_rank(ranks):
     pessimistic = (ranks >= true).sum()
     return (optimistic + pessimistic).float() * 0.5
 
-
-@torch.no_grad()
-def compute_mrr( edge_index, edge_type, data, model):
-
-    z = model.encode(data.edge_index, data.edge_type)
-
-    ranks = []
-    for i in tqdm(range(edge_type.numel())):
-        (src, dst), rel = edge_index[:, i], edge_type[i]
-
-        # Try all nodes as tails, but delete true triplets:
-        tail_mask = torch.ones(data.num_nodes, dtype=torch.bool)
-        for (heads, tails), types in [
-            (data.train_edge_index, data.train_edge_type),
-            (data.valid_edge_index, data.valid_edge_type),
-            (data.test_edge_index, data.test_edge_type),
-        ]:
-            tail_mask[tails[(heads == src) & (types == rel)]] = False
-
-        tail = torch.arange(data.num_nodes)[tail_mask]
-        tail = torch.cat([torch.tensor([dst]), tail])
-        head = torch.full_like(tail, fill_value=src)
-        eval_edge_index = torch.stack([head, tail], dim=0)
-        eval_edge_type = torch.full_like(tail, fill_value=rel)
-
-        out = model.decode(z, eval_edge_index, eval_edge_type)
-        rank = compute_rank(out)
-        ranks.append(rank)
-
-        # Try all nodes as heads, but delete true triplets:
-        head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
-        for (heads, tails), types in [
-            (data.train_edge_index, data.train_edge_type),
-            (data.valid_edge_index, data.valid_edge_type),
-            (data.test_edge_index, data.test_edge_type),
-        ]:
-            head_mask[heads[(tails == dst) & (types == rel)]] = False
-
-        head = torch.arange(data.num_nodes)[head_mask]
-        head = torch.cat([torch.tensor([src]), head])
-        tail = torch.full_like(head, fill_value=dst)
-        eval_edge_index = torch.stack([head, tail], dim=0)
-        eval_edge_type = torch.full_like(head, fill_value=rel)
-
-        out = model.decode(z, eval_edge_index, eval_edge_type)
-        rank = compute_rank(out)
-        ranks.append(rank)
-
-    scores = {
-        'mrr' : (1. / torch.tensor(ranks, dtype=torch.float)).mean(),
-        'mean_rank': torch.tensor(ranks, dtype=torch.float).mean(),
-        'hits@1': (torch.tensor(ranks, dtype=torch.float) <= 1).float().mean(),
-        'hits@3': (torch.tensor(ranks, dtype=torch.float) <= 3).float().mean(),
-        'hits@10': (torch.tensor(ranks, dtype=torch.float) <= 10).float().mean(),
-    }
-
-    return scores
-
 @torch.no_grad()
 def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_type, data, models: DeepEnsemble):
     """
@@ -142,12 +73,14 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
     head_filter, tail_filter = create_filter_dicts(data)
     
     ranks = []
+    top1_probs = []      
+    top1_is_correct = [] 
     
     # Pre-allocate a mask tensor to reuse memory
     mask_container = torch.ones(num_nodes, dtype=torch.bool, device=device)
     all_nodes = torch.arange(num_nodes, device=device)
 
-    iterator = tqdm(range(edge_type.numel()), desc="Computing MRR (Optimized)")
+    iterator = tqdm(range(edge_type.numel()), desc="Computing MRR")
     
     for i in iterator:
         src = edge_index[0, i].item()
@@ -163,10 +96,8 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
             indices = torch.tensor(list(true_tails), device=device)
             mask_container[indices] = False
             
-        # Mask out the target from the general candidates to avoid duplication
+
         mask_container[dst] = False
-        
-        # Get all negatives
         negatives = all_nodes[mask_container]
         
         tail_candidates = torch.cat([torch.tensor([dst], device=device), negatives])
@@ -177,7 +108,14 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
         eval_edge_type = torch.full_like(tail_candidates, fill_value=rel)
         # Use optimized inference
         score = models.inference_optimised(encoded_zs, eval_edge_index, eval_edge_type)
+        score = F.softmax(score, dim=0)
         ranks.append(compute_rank(score))
+
+        max_prob, max_idx = score.max(dim=0)
+        is_target = (max_idx == 0)
+        
+        top1_probs.append(max_prob.item())
+        top1_is_correct.append(is_target.long().item())
 
         # ========== Head Prediction ==========
         true_heads = head_filter.get((dst, rel), set())
@@ -198,7 +136,19 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
 
         # Use optimized inference
         score = models.inference_optimised(encoded_zs, eval_edge_index, eval_edge_type)
+        score = F.softmax(score, dim=0)
         ranks.append(compute_rank(score))
+        max_prob, max_idx = score.max(dim=0)
+        is_target = (max_idx == 0)
+        
+        top1_probs.append(max_prob.item())
+        top1_is_correct.append(is_target.long().item())
+
+    y_probs_tensor = torch.tensor(top1_probs)
+    y_true_tensor = torch.tensor(top1_is_correct)
+    
+    # Call your provided function
+    uncertainty_results = compute_uncertainty(y_true_tensor, y_probs_tensor)        
 
     # Calculate final metrics
     ranks_t = torch.tensor(ranks, dtype=torch.float)
@@ -208,10 +158,14 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
         'hits@1': (ranks_t <= 1).float().mean().item(),
         'hits@3': (ranks_t <= 3).float().mean().item(),
         'hits@10': (ranks_t <= 10).float().mean().item(),
+        'brier_score': uncertainty_results['brier_score'],
+        'ece': uncertainty_results['ece'],
+        'ace': uncertainty_results['ace'],
+        'prob_true': uncertainty_results['prob_true'],
+        'prob_pred': uncertainty_results['prob_pred'],        
     }
 
     return scores
-
 
 @torch.no_grad()
 def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_type, data, model, mc_samples=10):
@@ -225,6 +179,8 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
     model.encoder.mc_dropout = False
 
     ranks = []
+    top1_probs = []      
+    top1_is_correct = [] 
     for i in tqdm(range(edge_type.numel()), desc="Computing MRR"):
         (src, dst), rel = edge_index[:, i], edge_type[i]
 
@@ -247,11 +203,18 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         predictions = []
         for model_idx in range(mc_samples):
             pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
+            pred = F.softmax(pred, dim=0)
             predictions.append(pred)
         
-        out = torch.mean(torch.stack(predictions, dim=0), dim=0)
+        out = torch.stack(predictions).mean(dim=0)
         rank = compute_rank(out)
         ranks.append(rank)
+
+        max_prob, max_idx = out.max(dim=0)
+        is_target = (max_idx == 0)
+        
+        top1_probs.append(max_prob.item())
+        top1_is_correct.append(is_target.long().item())
 
         # Try all nodes as heads, but delete true triplets:
         head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
@@ -272,11 +235,23 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         predictions = []
         for model_idx in range(mc_samples):
             pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
+            pred = F.softmax(pred, dim=0)
             predictions.append(pred)
         
-        out = torch.mean(torch.stack(predictions, dim=0), dim=0)
+        out = torch.stack(predictions).mean(dim=0)
         rank = compute_rank(out)
         ranks.append(rank)
+        max_prob, max_idx = out.max(dim=0)
+        is_target = (max_idx == 0)
+        
+        top1_probs.append(max_prob.item())
+        top1_is_correct.append(is_target.long().item())
+
+    y_probs_tensor = torch.tensor(top1_probs)
+    y_true_tensor = torch.tensor(top1_is_correct)
+    
+    # Call your provided function
+    uncertainty_results = compute_uncertainty(y_true_tensor, y_probs_tensor)
 
     scores = {
         'mrr': (1. / torch.tensor(ranks, dtype=torch.float)).mean(),
@@ -284,6 +259,14 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         'hits@1': (torch.tensor(ranks, dtype=torch.float) <= 1).float().mean(),
         'hits@3': (torch.tensor(ranks, dtype=torch.float) <= 3).float().mean(),
         'hits@10': (torch.tensor(ranks, dtype=torch.float) <= 10).float().mean(),
+
+        # Add Uncertainty Metrics
+        'brier_score': uncertainty_results['brier_score'],
+        'ece': uncertainty_results['ece'],
+        'ace': uncertainty_results['ace'],
+        'prob_true': uncertainty_results['prob_true'],
+        'prob_pred': uncertainty_results['prob_pred'],
+
     }
 
     return scores
@@ -326,7 +309,114 @@ def compute_uncertainty(y_true, y_probs):
         'ece': ece_score,
         'ace': score,
         'prob_true': prob_true,
-        'prob_pred': prob_pred
+        'prob_pred': prob_pred,
+        
 
     }
 
+@torch.no_grad()
+def compute_mrr(edge_index, edge_type, data, model):
+    # Standard Inference: Eval mode (No Dropout)
+        model.eval()
+        z = model.encode(data.edge_index, data.edge_type)
+
+        ranks = []
+        
+        # Storage for Uncertainty Metrics (Top-1 Approach)
+        top1_probs = []
+        top1_is_correct = []
+
+        for i in tqdm(range(edge_type.numel())):
+            (src, dst), rel = edge_index[:, i], edge_type[i]
+
+            # --- TAIL PREDICTION ---
+            tail_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+            for (heads, tails), types in [
+                (data.train_edge_index, data.train_edge_type),
+                (data.valid_edge_index, data.valid_edge_type),
+                (data.test_edge_index, data.test_edge_type),
+            ]:
+                tail_mask[tails[(heads == src) & (types == rel)]] = False
+
+            tail = torch.arange(data.num_nodes)[tail_mask]
+            # True target is ALWAYS at index 0
+            tail = torch.cat([torch.tensor([dst]), tail])
+            head = torch.full_like(tail, fill_value=src)
+            eval_edge_index = torch.stack([head, tail], dim=0)
+            eval_edge_type = torch.full_like(tail, fill_value=rel)
+
+            # 1. Decode
+            out = model.decode(z, eval_edge_index, eval_edge_type)
+            
+            # 2. Softmax (Standard One-Pass)
+            probs = F.softmax(out, dim=0)
+            
+            # 3. Compute Rank
+            rank = compute_rank(probs)
+            ranks.append(rank)
+
+            # 4. Collect Top-1 Data for Uncertainty
+            # Find the confidence of the Top-1 prediction
+            max_prob, max_idx = probs.max(dim=0)
+            
+            # Was the Top-1 prediction actually the Target (index 0)?
+            # 1 = Correct (Confidence calibrated), 0 = Incorrect (Overconfident)
+            is_target = (max_idx == 0)
+            
+            top1_probs.append(max_prob.item())
+            top1_is_correct.append(is_target.long().item())
+
+
+            # --- HEAD PREDICTION ---
+            head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+            for (heads, tails), types in [
+                (data.train_edge_index, data.train_edge_type),
+                (data.valid_edge_index, data.valid_edge_type),
+                (data.test_edge_index, data.test_edge_type),
+            ]:
+                head_mask[heads[(tails == dst) & (types == rel)]] = False
+
+            head = torch.arange(data.num_nodes)[head_mask]
+            head = torch.cat([torch.tensor([src]), head])
+            tail = torch.full_like(head, fill_value=dst)
+            eval_edge_index = torch.stack([head, tail], dim=0)
+            eval_edge_type = torch.full_like(head, fill_value=rel)
+
+            out = model.decode(z, eval_edge_index, eval_edge_type)
+            probs = F.softmax(out, dim=0)
+            
+            rank = compute_rank(probs)
+            ranks.append(rank)
+
+            # Collect Top-1 Data
+            max_prob, max_idx = probs.max(dim=0)
+            is_target = (max_idx == 0)
+            
+            top1_probs.append(max_prob.item())
+            top1_is_correct.append(is_target.long().item())
+
+        # --- Final Metric Calculation ---
+        
+        # Convert lists to Tensors for your function
+        y_probs_tensor = torch.tensor(top1_probs)
+        y_true_tensor = torch.tensor(top1_is_correct)
+
+        # Call your provided function
+        uncertainty_results = compute_uncertainty(y_true_tensor, y_probs_tensor)
+
+        scores = {
+            'mrr' : (1. / torch.tensor(ranks, dtype=torch.float)).mean(),
+            'mean_rank': torch.tensor(ranks, dtype=torch.float).mean(),
+            'hits@1': (torch.tensor(ranks, dtype=torch.float) <= 1).float().mean(),
+            'hits@3': (torch.tensor(ranks, dtype=torch.float) <= 3).float().mean(),
+            'hits@10': (torch.tensor(ranks, dtype=torch.float) <= 10).float().mean(),
+            
+            # Add Uncertainty Metrics
+            'brier_score': uncertainty_results['brier_score'],
+            'ece': uncertainty_results['ece'],
+            'ace': uncertainty_results['ace'],
+            'prob_true': uncertainty_results['prob_true'],
+            'prob_pred': uncertainty_results['prob_pred'],
+        }
+
+        return scores

@@ -200,8 +200,6 @@ class DeepEnsemble(nn.Module):
             probs = torch.sigmoid(logits)
             outs.append(probs)
             
-            # Collect relation embeddings for this model
-            # Assuming model.decoder.rel_emb exists and is the embedding matrix
             if self.calibration == "input_dependent" and self.use_calibration:
                 all_rel_embs.append(model.decoder.rel_emb[eval_edge_type])
             

@@ -17,32 +17,31 @@ model:
     b_init: false
   
 ensemble:
-  enabled: true
+  enabled: false
   num_models: 5 
 
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 1
+    negative_sampling_ratio: 3
     edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
     weight_decay: 0.0001
   evaluation_frequency: 500
-  save_frequency: 1000
   early stopping:
     enabled: true
     patience: 5
     delta: 0.001
   load_model: false
   save_model: true
-  checkpoint_path: ./checkpoints/FB15k-237_ensemble_checkpoint_epoch_4000.pth
+  checkpoint_path: ./checkpoints/FB15k-237_checkpoint_epoch_2000.pth
   label_smoothing: 
-    positive: 0.9
+    positive: 0.95
     negative: 0.05
 calibration:
-  type: ensemble
+  type: standard
   mc_samples: 5
-  method: input_dependent
-  max_iters: 20
+  method: scalar
+  max_iters: 100
   learning_rate: 0.01

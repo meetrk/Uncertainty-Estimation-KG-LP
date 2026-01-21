@@ -49,7 +49,7 @@ class Pipeline(BasePipeline):
             # Evaluation
             if epoch % eval_frequency == 0:
 
-                valid_scores, test_scores = self.test(test=False)
+                valid_scores, test_scores = self.test(test=True)
 
                 current_val_mrr = valid_scores['mrr']
             
@@ -92,6 +92,11 @@ class Pipeline(BasePipeline):
                 self.logger.info(f"Epoch {epoch}: Val Hits@1 = {valid_scores['hits@1']:.4f}, Test Hits@1 = {test_scores['hits@1']:.4f}")
                 self.logger.info(f"Epoch {epoch}: Val Hits@3 = {valid_scores['hits@3']:.4f}, Test Hits@3 = {test_scores['hits@3']:.4f}")
                 self.logger.info(f"Epoch {epoch}: Val Hits@10 = {valid_scores['hits@10']:.4f}, Test Hits@10 = {test_scores['hits@10']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val ECE= {valid_scores['ece']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val ACE= {valid_scores['ace']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Brier Score = {valid_scores['brier_score']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val True Probability = {valid_scores['prob_true']}")
+                self.logger.info(f"Epoch {epoch}: Val Predicted Probability = {valid_scores['prob_pred']}")
 
                 # Log evaluation metrics to TensorBoard
                 self.writer.add_scalar('MRR/Validation', valid_scores['mrr'], epoch)
@@ -104,19 +109,9 @@ class Pipeline(BasePipeline):
                 self.writer.add_scalar('Hits@3/Test', test_scores['hits@3'], epoch)
                 self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
                 self.writer.add_scalar('Hits@10/Test', test_scores['hits@10'], epoch)
-
-                scores = self.test_uncertainty(
-                        self.model,
-                        self.config.get_section('calibration')['type'],
-                        self.data.edge_index,
-                        self.data.edge_type,
-                        self.data.valid_edge_index,
-                        self.data.valid_edge_type,
-                        uncertainty_samples=self.config.get_section('calibration')['mc_samples']
-                    )
-
-                self.writer.add_scalar('MC_Uncertainty/Brier_Score', scores['brier_score'], epoch)
-                self.writer.add_scalar('MC_Uncertainty/ECE', scores['ece'], epoch)
+                self.writer.add_scalar('MC_Uncertainty/Brier_Score', valid_scores['brier_score'], epoch)
+                self.writer.add_scalar('MC_Uncertainty/ECE', valid_scores['ece'], epoch)
+                self.writer.add_scalar('MC_Uncertainty/ACE', valid_scores['ace'], epoch)
 
         
         # Close TensorBoard writer
@@ -136,17 +131,7 @@ class Pipeline(BasePipeline):
             valid_edge_index=self.data.test_edge_index,
             valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
-
-        scores = self.test_uncertainty(
-            self.model,
-            type,
-            self.data.edge_index,
-            self.data.edge_type,
-            self.data.test_edge_index,
-            self.data.test_edge_type,
-            uncertainty_samples
-            )
-
+        
         calibration_model = self.calibrate_pipeline(
             method=self.config.get_section('calibration')['method'],
             model=self.model,
@@ -161,16 +146,6 @@ class Pipeline(BasePipeline):
             valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
 
-
-        scores = self.test_uncertainty(
-            self.model,
-            type,
-            self.data.edge_index,
-            self.data.edge_type,
-            self.data.test_edge_index,
-            self.data.test_edge_type,
-            uncertainty_samples
-        )
         if save:
             self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
         
@@ -181,10 +156,9 @@ class Pipeline(BasePipeline):
             return_logits: If True, return raw logits; if False, return sigmoid probabilities
         """
         self.model.eval()
-        if mc_samples > 1:
-            self.model.encoder.mc_dropout = True  
+        self.model.encoder.mc_dropout = True  
 
-        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 1)
+        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 100)
       
         preds_list = []
         pos_out = None
@@ -233,22 +207,19 @@ class Pipeline(BasePipeline):
         
         Args:
             return_logits: If True, return raw logits; if False, return sigmoid probabilities
-            apply_isotonic: If True, apply isotonic regression calibration (only for uncertainty evaluation)
         """
         model.eval()
-        z = model.encoder(edge_index, edge_type)
+        z = model.encoder(edge_index, edge_type).detach()
         pos_scores = model.decode(z, test_edge_index, test_edge_type)
-        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 1)
+        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 100)
         neg_scores = model.decode(z, neg_edge_index, neg_edge_type)
         labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
         scores = torch.cat([pos_scores, neg_scores])
         
         # Only apply calibration when returning probabilities, not raw logits
         if not return_logits:
-            # First convert logits to probabilities
+
             scores = torch.sigmoid(scores)
-            
-            # Then apply isotonic regression to probabilities if available
             if hasattr(model.decoder, 'isotonic_regression_transform') and model.decoder.isotonic_regression_transform is not None and model.decoder.use_calibration:
                 device = scores.device
                 scores_np = scores.cpu().numpy().flatten()
@@ -258,7 +229,7 @@ class Pipeline(BasePipeline):
         return scores, labels
 
     @torch.no_grad()
-    def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type, apply_isotonic=False):
+    def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False):
         """Standard inference with gradients disabled."""
         return self._inference_helper(model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False)
 
@@ -308,6 +279,7 @@ class Pipeline(BasePipeline):
         self.model.eval()
         z = self.model.encode(self.data.edge_index, self.data.edge_type)
         valid_scores = compute_mrr(self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
+        self.logger
         if test:
             test_scores = compute_mrr(self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
             return valid_scores, test_scores
@@ -317,7 +289,6 @@ class Pipeline(BasePipeline):
     @torch.no_grad()
     def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples=None):
 
-        
         if method == 'mc_dropout':
             assert uncertainty_samples is not None, "MC Dropout requires specifying number of samples."
             scores, labels = self.inference_mc(
@@ -333,7 +304,12 @@ class Pipeline(BasePipeline):
         elif method == 'standard':
         
             scores, labels = self.inference(
-                model, edge_index, edge_type, test_edge_index, test_edge_type,
+                model,
+                edge_index, 
+                edge_type,
+                test_edge_index, 
+                test_edge_type, 
+                return_logits=False
             )
             val_scores = compute_uncertainty(labels,scores)
 
