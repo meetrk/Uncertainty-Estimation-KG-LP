@@ -12,7 +12,7 @@ class KGEModel(torch.nn.Module):
     Args:
         num_nodes (int): The number of nodes/entities in the graph.
         num_relations (int): The number of relations in the graph.
-        hidden_channels (int): The hidden embedding size.
+        embedding_dim (int): The hidden embedding size.
         sparse (bool, optional): If set to :obj:`True`, gradients w.r.t. to the
             embedding matrices will be sparse. (default: :obj:`False`)
     """
@@ -20,7 +20,7 @@ class KGEModel(torch.nn.Module):
         self,
         num_nodes: int,
         num_relations: int,
-        hidden_channels: int,
+        embedding_dim: int,
         sparse: bool = False,
         calibration: str = "none"
     ):
@@ -28,8 +28,8 @@ class KGEModel(torch.nn.Module):
 
         self.num_nodes = num_nodes
         self.num_relations = num_relations
-        self.hidden_channels = hidden_channels
-        self.rel_emb = Parameter(torch.FloatTensor(num_relations, hidden_channels))
+        self.embedding_dim = embedding_dim
+        self.rel_emb = Parameter(torch.FloatTensor(num_relations, embedding_dim))
         self.calibration = calibration
 
         if self.calibration == "scalar":
@@ -38,9 +38,9 @@ class KGEModel(torch.nn.Module):
         elif self.calibration == "input_dependent":
             self.use_input_dependent_temp = False 
             self.temp_network = torch.nn.Sequential(
-                torch.nn.Linear(2 * hidden_channels, hidden_channels // 2),
+                torch.nn.Linear(2 * embedding_dim, embedding_dim // 2),
                 torch.nn.ReLU(),
-                torch.nn.Linear(hidden_channels // 2, 1),
+                torch.nn.Linear(embedding_dim // 2, 1),
                 torch.nn.Softplus()  
             )
             # Initialize to output ~1.0 (no scaling) initially
@@ -66,8 +66,8 @@ class KGEModel(torch.nn.Module):
         r"""Computes input-dependent temperature for each query (h, r).
         
         Args:
-            head_emb: Head entity embeddings [batch_size, hidden_channels]
-            rel_emb: Relation embeddings [batch_size, hidden_channels]
+            head_emb: Head entity embeddings [batch_size, embedding_dim]
+            rel_emb: Relation embeddings [batch_size, embedding_dim]
             
         Returns:
             Temperature scalar for each query [batch_size, 1]
@@ -77,7 +77,7 @@ class KGEModel(torch.nn.Module):
             return torch.ones(head_emb.size(0), 1, device=head_emb.device)
 
         # Concatenate head and relation embeddings
-        query_emb = torch.cat([head_emb, rel_emb], dim=-1)  # [batch_size, 2 * hidden_channels]
+        query_emb = torch.cat([head_emb, rel_emb], dim=-1)  # [batch_size, 2 * embedding_dim]
         
         # Predict temperature (add small epsilon to avoid division by zero)
         temperature = self.temp_network(query_emb) + 0.01  # [batch_size, 1]
@@ -211,7 +211,7 @@ class KGEModel(torch.nn.Module):
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.num_nodes}, '
                 f'num_relations={self.num_relations}, '
-                f'hidden_channels={self.hidden_channels})')
+                f'embedding_dim={self.embedding_dim})')
 
     def s_penalty(self, head_index, rel_type, tail_index, nodes):
         """ Compute Schlichtkrull L2 penalty for the decoder """

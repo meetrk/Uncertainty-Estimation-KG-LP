@@ -39,13 +39,13 @@ class DistMult(KGEModel):
         self,
         num_nodes: int,
         num_relations: int,
-        hidden_channels: int,
+        embedding_dim: int,
         margin: float = 1.0,
         sparse: bool = False,
         calibration: str = "none",
         
     ):
-        super().__init__(num_nodes, num_relations, hidden_channels, sparse, calibration)
+        super().__init__(num_nodes, num_relations, embedding_dim, sparse, calibration)
 
         self.margin = margin
 

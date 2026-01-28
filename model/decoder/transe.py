@@ -32,7 +32,7 @@ class TransE(KGEModel):
     Args:
         num_nodes (int): The number of nodes/entities in the graph.
         num_relations (int): The number of relations in the graph.
-        hidden_channels (int): The hidden embedding size.
+        embedding_dim (int): The hidden embedding size.
         margin (int, optional): The margin of the ranking loss.
             (default: :obj:`1.0`)
         p_norm (int, optional): The order embedding and distance normalization.
@@ -44,13 +44,13 @@ class TransE(KGEModel):
         self,
         num_nodes: int,
         num_relations: int,
-        hidden_channels: int,
+        embedding_dim: int,
         margin: float = 1.0,
         p_norm: float = 1.0,
         sparse: bool = False,
         calibration: str = "none",
     ):
-        super().__init__(num_nodes, num_relations, hidden_channels, sparse, calibration)
+        super().__init__(num_nodes, num_relations, embedding_dim, sparse, calibration)
 
         self.p_norm = p_norm
         self.margin = margin
@@ -59,7 +59,7 @@ class TransE(KGEModel):
         self.reset_parameters()
 
     def reset_parameters(self):
-        bound = 6. / math.sqrt(self.hidden_channels)
+        bound = 6. / math.sqrt(self.embedding_dim)
         torch.nn.init.uniform_(self.rel_emb, -bound, bound)
         F.normalize(self.rel_emb.data, p=self.p_norm, dim=-1,
                     out=self.rel_emb.data)

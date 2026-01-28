@@ -36,13 +36,13 @@ class RGCN(nn.Module):
         
         # RGCN layers
         # self.conv1 = RGCNLayer(
-        #     self.embedding_dim, self.hidden_layer_size, self.num_relations, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
+        #     self.embedding_dim, self.hidden_layer_size, self.num_relations, num_bases=self.num_bases)
         # self.conv2 = RGCNLayer(
-        #     self.hidden_layer_size, self.embedding_dim, self.num_relations, num_bases=self.num_bases, w_init=self.w_init, w_gain=self.w_gain, b_init=self.b_init)
+        #     self.hidden_layer_size, self.embedding_dim, self.num_relations, num_bases=self.num_bases)
         self.conv1 = RGCNConv(self.embedding_dim, self.hidden_layer_size, self.num_relations,
-                              num_blocks=5)
+                              num_bases=5)
         self.conv2 = RGCNConv(self.hidden_layer_size, self.embedding_dim, self.num_relations,
-                              num_blocks=5)
+                              num_bases=5)
 
         self.reset_parameters()
 
