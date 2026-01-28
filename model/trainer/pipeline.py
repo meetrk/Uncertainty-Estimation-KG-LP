@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torch
 from model.trainer.basepipeline import BasePipeline
 from utils.utils import negative_sampling
-from utils.evaluation import compute_mrr, compute_uncertainty, compute_mrr_mc_dropout
+from utils.evaluation import compute_mrr, compute_uncertainty
 from utils.utils import dropout_edges
 from model.trainer.basepipeline import BasePipeline
 
@@ -49,7 +49,7 @@ class Pipeline(BasePipeline):
             # Evaluation
             if epoch % eval_frequency == 0:
 
-                valid_scores, test_scores = self.test(test=True)
+                valid_scores, test_scores = self.test(test=False)
 
                 current_val_mrr = valid_scores['mrr']
             
@@ -132,19 +132,23 @@ class Pipeline(BasePipeline):
             valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
         
-        calibration_model = self.calibrate_pipeline(
-            method=self.config.get_section('calibration')['method'],
-            model=self.model,
-            max_iters=self.config.get_section('calibration').get('max_iters', 50),
-            lr=self.config.get_section('calibration').get('learning_rate', 0.01)
-        )
-
-        scores = self.test_link_pred(
+        if self.config.get_section('calibration')['enabled']:
+            self.logger.info("Starting calibration on test set...")
+            calibration_model = self.calibrate_pipeline(
+                method=self.config.get_section('calibration')['method'],
+                model=self.model,
+                max_iters=self.config.get_section('calibration').get('max_iters', 50),
+                lr=self.config.get_section('calibration').get('learning_rate', 0.01)
+            )
+            scores = self.test_link_pred(
             type=type,
             model=self.model,
             valid_edge_index=self.data.test_edge_index,
             valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
+
+        else:
+            self.logger.info("Calibration not enabled; skipping calibration step.")
 
         if save:
             self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
@@ -218,10 +222,10 @@ class Pipeline(BasePipeline):
         
         # Only apply calibration when returning probabilities, not raw logits
         if not return_logits:
-
             scores = torch.sigmoid(scores)
             if hasattr(model.decoder, 'isotonic_regression_transform') and model.decoder.isotonic_regression_transform is not None and model.decoder.use_calibration:
                 device = scores.device
+                print("Applying isotonic regression calibration...")
                 scores_np = scores.cpu().numpy().flatten()
                 calibrated_scores_np = model.decoder.isotonic_regression_transform.predict(scores_np)
                 scores = torch.tensor(calibrated_scores_np, dtype=torch.float32, device=device)
@@ -391,7 +395,7 @@ class Pipeline(BasePipeline):
                 self.data.valid_edge_index,
                 self.data.valid_edge_type,
                 mc_samples=params['mc_samples'],
-                return_logits=params['return_logits'] 
+                return_logits=True
             )
         elif params['type'] == 'standard':
             logits, labels = self._inference_helper(
@@ -400,7 +404,7 @@ class Pipeline(BasePipeline):
                 self.data.edge_type,
                 self.data.valid_edge_index,
                 self.data.valid_edge_type,
-                return_logits=params['return_logits'] 
+                return_logits=True
             )
         else:
             raise ValueError(f"Unsupported evaluation method: {params['type']}")
@@ -468,7 +472,7 @@ class Pipeline(BasePipeline):
         for iteration in range(1, max_iters + 1):
             # Optimization step
             optimizer.zero_grad()
-            loss = self.compute_nll_loss(model, params=type_params)
+            loss = self.compute_nll_loss_ranking(model, params=type_params)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(temp_params, max_norm=1.0)
             optimizer.step()
@@ -560,7 +564,7 @@ class Pipeline(BasePipeline):
         
         def eval_closure():
             optimizer.zero_grad()
-            loss = self.compute_nll_loss(model, params=type_params)
+            loss = self.compute_nll_loss_ranking(model, params=type_params)
             loss.backward()
             return loss
         
@@ -568,7 +572,6 @@ class Pipeline(BasePipeline):
         for iteration in range(1, max_iters + 1):
             loss = optimizer.step(eval_closure)
             current_temp = model.decoder.temperature.item()
-            
             if iteration % 10 == 0:
                 self.logger.info(
                     f"Iter {iteration}/{max_iters}: "
@@ -641,3 +644,59 @@ class Pipeline(BasePipeline):
 
         return {"isotonic_model": iso_reg}
 
+
+
+    def compute_nll_loss_ranking(self, model, params):
+        """
+        Compute NLL loss for calibration using ranking setup (same as MRR evaluation).
+        """
+        if params['type'] == 'mc_dropout':
+            model.encoder.mc_dropout = True
+            # Encode multiple times for MC dropout
+            all_z = []
+            for _ in range(params['mc_samples']):
+                z = model.encode(self.data.edge_index, self.data.edge_type)
+                all_z.append(z)
+            model.encoder.mc_dropout = False
+        else:
+            z = model.encode(self.data.edge_index, self.data.edge_type)
+        
+        total_loss = torch.tensor(0.0, requires_grad=True)
+        num_edges = min(100, self.data.valid_edge_type.numel())  # Subsample for efficiency
+        
+        for i in range(num_edges):
+            src = self.data.valid_edge_index[0, i].item()
+            dst = self.data.valid_edge_index[1, i].item()
+            rel = self.data.valid_edge_type[i].item()
+            
+            # --- TAIL PREDICTION (same filtering as MRR) ---
+            tail_mask = torch.ones(self.data.num_nodes, dtype=torch.bool)
+            for (heads, tails), types in [
+                (self.data.train_edge_index, self.data.train_edge_type),
+                (self.data.valid_edge_index, self.data.valid_edge_type),
+                (self.data.test_edge_index, self.data.test_edge_type),
+            ]:
+                tail_mask[tails[(heads == src) & (types == rel)]] = False
+            
+            tail = torch.arange(self.data.num_nodes)[tail_mask]
+            tail = torch.cat([torch.tensor([dst]), tail])
+            head = torch.full_like(tail, fill_value=src)
+            eval_edge_index = torch.stack([head, tail], dim=0)
+            eval_edge_type = torch.full_like(tail, fill_value=rel)
+            
+            # Decode
+            if params['type'] == 'mc_dropout':
+                predictions = []
+                for z_sample in all_z:
+                    pred = model.decode(z_sample, eval_edge_index, eval_edge_type)
+                    predictions.append(pred)
+                logits = torch.stack(predictions).mean(dim=0)
+            else:
+                logits = model.decode(z, eval_edge_index, eval_edge_type)
+            
+            # Compute NLL: Target is at index 0
+            log_probs = F.log_softmax(logits, dim=0)
+            loss = -log_probs[0]  # Negative log-likelihood of true target
+            total_loss = total_loss + loss
+        
+        return total_loss / num_edges
