@@ -136,7 +136,7 @@ def main():
         decoder = decoder(
             num_nodes=data.num_nodes,
             num_relations=dataset.num_relations // 2,
-            hidden_channels=config_loader.get_section('model')['encoder']['embedding_dim'],
+            embedding_dim=config_loader.get_section('model')['encoder']['embedding_dim'],
             calibration = calibration_config['method'],
         )
         logger.info(f"Decoder initialized: {decoder}")
