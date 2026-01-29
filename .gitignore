@@ -11,3 +11,4 @@ training.log
 dataset/
 notebooks/
 data/
+saved_models/
