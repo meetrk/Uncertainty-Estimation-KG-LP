@@ -40,9 +40,9 @@ class RGCN(nn.Module):
         # self.conv2 = RGCNLayer(
         #     self.hidden_layer_size, self.embedding_dim, self.num_relations, num_bases=self.num_bases)
         self.conv1 = RGCNConv(self.embedding_dim, self.hidden_layer_size, self.num_relations,
-                              num_bases=5)
+                              num_blocks=5)
         self.conv2 = RGCNConv(self.hidden_layer_size, self.embedding_dim, self.num_relations,
-                              num_bases=5)
+                              num_blocks=5)
 
         self.reset_parameters()
 

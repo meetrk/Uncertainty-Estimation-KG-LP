@@ -49,7 +49,7 @@ class Pipeline(BasePipeline):
             # Evaluation
             if epoch % eval_frequency == 0:
 
-                valid_scores, test_scores = self.test(test=False)
+                valid_scores, test_scores = self.test(test=self.train_config.get('test', True))
 
                 current_val_mrr = valid_scores['mrr']
             
