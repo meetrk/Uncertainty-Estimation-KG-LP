@@ -1,6 +1,8 @@
 import torch
 from random import sample
 import numpy as np
+import torch.nn.functional as F
+
 
 def get_triples(edge_index, edge_type):
     """
@@ -211,3 +213,89 @@ def dropout_edges(edge_index, edge_type, dropout_ratio):
     dropped_edge_type = edge_type[mask]
     
     return dropped_edge_index, dropped_edge_type
+
+
+def top_k_softmax(logits, k=50):
+    # Handle 1D tensor (single query) - most common case
+    if logits.dim() == 1:
+        # 1. Find the top K scores
+        values, indices = torch.topk(logits, k=min(k, logits.size(0)))
+        
+        # 2. Create a mask of -inf
+        mask = torch.full_like(logits, float('-inf'))
+        
+        # 3. Put the top K values back into the mask
+        mask[indices] = values
+        
+        # 4. Apply Softmax (the -inf values become exactly 0.0)
+        return F.softmax(mask, dim=0)
+    
+    # Handle 2D tensor (batched queries)
+    else:
+        # 1. Find the top K scores
+        values, indices = torch.topk(logits, k=min(k, logits.size(1)), dim=1)
+        
+        # 2. Create a mask of -inf
+        mask = torch.full_like(logits, float('-inf'))
+        
+        # 3. Put the top K values back into the mask
+        mask.scatter_(1, indices, values)
+        
+        # 4. Apply Softmax (the -inf values become exactly 0.0)
+        return F.softmax(mask, dim=1)
+
+def top_p_softmax(logits, p=0.9):
+    """
+    Applies Top-P (Nucleus) Sampling to logits.
+    
+    Args:
+        logits (torch.Tensor): Input logits (1D or 2D).
+        p (float): Cumulative probability threshold (0.0 to 1.0).
+                   Items are kept until their sum reaches p.
+    
+    Returns:
+        torch.Tensor: Probability distribution (summing to 1) with 
+                      low-probability tails zeroed out.
+    """
+    # Clone to avoid modifying original tensor in-place
+    logits = logits.clone()
+    
+    # Handle 1D tensor (single query) -> unsqueeze to make it 2D for unified processing
+    is_1d = logits.dim() == 1
+    if is_1d:
+        logits = logits.unsqueeze(0)  # Shape: [1, vocab_size]
+
+    # 1. Sort logits in descending order
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=1)
+    
+    # 2. Compute probabilities of the sorted logits
+    sorted_probs = F.softmax(sorted_logits, dim=1)
+    
+    # 3. Compute cumulative probabilities
+    cumulative_probs = torch.cumsum(sorted_probs, dim=1)
+    
+    # 4. Create the mask (Remove tokens where cumulative probability > p)
+    # We want to keep the tokens that sum up to 'p', so we filter where sum > p.
+    sorted_indices_to_remove = cumulative_probs > p
+    
+    # SHIFT MASK RIGHT: We must ensure the first token that crosses the threshold 
+    # is INCLUDED (not removed). So we shift the mask to the right by 1.
+    # The first token is always kept (set 0th index to False).
+    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+    sorted_indices_to_remove[:, 0] = False
+
+    # 5. Map the sorted mask back to original indices
+    # We create a mask for the original logits shape
+    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+    
+    # 6. Set removed logits to -inf so they become 0 in the final softmax
+    logits[indices_to_remove] = float('-inf')
+    
+    # 7. Re-normalize (Apply Softmax to the masked logits)
+    probs = F.softmax(logits, dim=1)
+    
+    # Squeeze back if input was 1D
+    if is_1d:
+        probs = probs.squeeze(0)
+        
+    return probs
