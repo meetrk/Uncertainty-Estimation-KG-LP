@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torch
 from model.trainer.basepipeline import BasePipeline
 from utils.utils import negative_sampling
-from utils.evaluation import compute_mrr, compute_uncertainty
+from utils.evaluation import compute_mrr, compute_mrr_mc_dropout
 from utils.utils import dropout_edges
 from model.trainer.basepipeline import BasePipeline
 
@@ -153,89 +153,6 @@ class Pipeline(BasePipeline):
         if save:
             self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
         
-    def _inference_mc_helper(self, model, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples=10, return_logits=False):
-        """Helper method for MC dropout inference without gradient control.
-        
-        Args:
-            return_logits: If True, return raw logits; if False, return sigmoid probabilities
-        """
-        self.model.eval()
-        self.model.encoder.mc_dropout = True  
-
-        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 100)
-      
-        preds_list = []
-        pos_out = None
-        neg_out = None
-
-        for _ in range(mc_samples):
-            z = self.model.encode(edge_index, edge_type)
-            pos_out = self.model.decode(z, test_edge_index, test_edge_type)
-            neg_out = self.model.decode(z, neg_edge_index, neg_edge_type)
-            out = torch.cat([pos_out, neg_out])
-            preds_list.append(out)
-
-        self.model.encoder.mc_dropout = False
-        
-        # pos_out and neg_out are guaranteed to be set after the loop
-        assert pos_out is not None and neg_out is not None
-        labels = torch.cat([
-            torch.ones_like(pos_out),
-            torch.zeros_like(neg_out)
-        ])
-        
-        preds_stack = torch.stack(preds_list)
-        preds_mean = preds_stack.mean(dim=0)
-        
-        # Only apply calibration when returning probabilities, not raw logits
-        if not return_logits:
-            # First convert logits to probabilities
-            preds_mean = torch.sigmoid(preds_mean)
-            
-            # Then apply isotonic regression to probabilities if available
-            if hasattr(model.decoder, 'isotonic_regression_transform') and model.decoder.isotonic_regression_transform is not None and model.decoder.use_calibration:
-                device = preds_mean.device
-                preds_mean_np = preds_mean.cpu().numpy().flatten()
-                calibrated_preds_mean_np = self.model.decoder.isotonic_regression_transform.predict(preds_mean_np)
-                preds_mean = torch.tensor(calibrated_preds_mean_np, dtype=torch.float32, device=device)
-
-        return preds_mean, labels
-
-    @torch.no_grad()
-    def inference_mc(self,model, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples=10):
-        """MC dropout inference with gradients disabled."""
-        return self._inference_mc_helper(model, edge_index, edge_type, test_edge_index, test_edge_type, mc_samples, return_logits=False)
-
-    def _inference_helper(self, model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False):
-        """Helper method for standard inference without gradient control.
-        
-        Args:
-            return_logits: If True, return raw logits; if False, return sigmoid probabilities
-        """
-        model.eval()
-        z = model.encoder(edge_index, edge_type).detach()
-        pos_scores = model.decode(z, test_edge_index, test_edge_type)
-        neg_edge_index, neg_edge_type = negative_sampling(test_edge_index, test_edge_type, self.data.num_nodes, 100)
-        neg_scores = model.decode(z, neg_edge_index, neg_edge_type)
-        labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
-        scores = torch.cat([pos_scores, neg_scores])
-        
-        # Only apply calibration when returning probabilities, not raw logits
-        if not return_logits:
-            scores = torch.sigmoid(scores)
-            if hasattr(model.decoder, 'isotonic_regression_transform') and model.decoder.isotonic_regression_transform is not None and model.decoder.use_calibration:
-                device = scores.device
-                print("Applying isotonic regression calibration...")
-                scores_np = scores.cpu().numpy().flatten()
-                calibrated_scores_np = model.decoder.isotonic_regression_transform.predict(scores_np)
-                scores = torch.tensor(calibrated_scores_np, dtype=torch.float32, device=device)
-
-        return scores, labels
-
-    @torch.no_grad()
-    def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False):
-        """Standard inference with gradients disabled."""
-        return self._inference_helper(model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False)
 
     def train(self):
         """
@@ -281,54 +198,13 @@ class Pipeline(BasePipeline):
     def test(self, test = True):
 
         self.model.eval()
-        z = self.model.encode(self.data.edge_index, self.data.edge_type)
-        valid_scores = compute_mrr(self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model)
-        self.logger
+        valid_scores = compute_mrr(self.data.valid_edge_index, self.data.valid_edge_type,self.data, self.model, return_probs= False)
         if test:
-            test_scores = compute_mrr(self.data.test_edge_index, self.data.test_edge_type,self.data, self.model)
+            test_scores = compute_mrr(self.data.test_edge_index, self.data.test_edge_type,self.data, self.model, return_probs= False)
             return valid_scores, test_scores
 
         return valid_scores, None
 
-    @torch.no_grad()
-    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples=None):
-
-        if method == 'mc_dropout':
-            assert uncertainty_samples is not None, "MC Dropout requires specifying number of samples."
-            scores, labels = self.inference_mc(
-                model,
-                edge_index,
-                edge_type,
-                test_edge_index,
-                test_edge_type,
-                mc_samples=uncertainty_samples
-            )
-            val_scores = compute_uncertainty(labels,scores)
-            
-        elif method == 'standard':
-        
-            scores, labels = self.inference(
-                model,
-                edge_index, 
-                edge_type,
-                test_edge_index, 
-                test_edge_type, 
-                return_logits=False
-            )
-            val_scores = compute_uncertainty(labels,scores)
-
-        else:
-            raise ValueError(f"Unsupported uncertainty estimation method: {method}")
-
-        self.logger.info(f"Brier Score: {val_scores['brier_score']:.4f}")
-        self.logger.info(f"ECE: {val_scores['ece']:.4f}")
-        self.logger.info(f"ACE: {val_scores['ace']:.4f}")
-        self.logger.info(f"Probability True: {val_scores['prob_true']}")
-        self.logger.info(f"Probability Predicted: {val_scores['prob_pred']}")
-
-        self.logger.info(f" {val_scores}")
-
-        return val_scores
 
     def calibrate_pipeline(self, method, model, max_iters=50, lr=0.01):
         """Main entry point for calibration."""
@@ -372,46 +248,6 @@ class Pipeline(BasePipeline):
                 'min': temps.min().item(),
                 'max': temps.max().item()
             }
-
-    def compute_nll_loss(self, model, params):
-        """
-        Compute Negative Log-Likelihood loss for calibration.
-        
-        Args:
-            model: The GAE model
-            params: Parameters dict with 'type' and 'mc_samples'
-            
-        Returns:
-            NLL loss value
-        """
-        # For calibration, we need gradients to flow through temperature
-        # Call helper methods without @torch.no_grad() decorator to enable gradients
-        
-        if params['type'] == 'mc_dropout':
-            logits, labels = self._inference_mc_helper(
-                model,
-                self.data.edge_index,
-                self.data.edge_type,
-                self.data.valid_edge_index,
-                self.data.valid_edge_type,
-                mc_samples=params['mc_samples'],
-                return_logits=True
-            )
-        elif params['type'] == 'standard':
-            logits, labels = self._inference_helper(
-                model,
-                self.data.edge_index,
-                self.data.edge_type,
-                self.data.valid_edge_index,
-                self.data.valid_edge_type,
-                return_logits=True
-            )
-        else:
-            raise ValueError(f"Unsupported evaluation method: {params['type']}")
-        
-        nll_loss = F.binary_cross_entropy_with_logits(logits, labels)
-        
-        return nll_loss
 
     def calibrate_input_dependent_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
         """Calibrate input-dependent temperature network on validation set.
@@ -607,35 +443,30 @@ class Pipeline(BasePipeline):
         model.eval()
         with torch.no_grad():
             if type_params['type'] == 'mc_dropout':
-                logits, labels = self._inference_mc_helper(
-                    model,
+                probs, labels = compute_mrr_mc_dropout(
                     self.data.edge_index,
                     self.data.edge_type,
                     self.data.valid_edge_index,
                     self.data.valid_edge_type,
+                    self.data,
+                    model,
                     mc_samples=type_params['mc_samples'],
-                    return_logits=True,
+                    return_probs=True
                 )
             elif type_params['type'] == 'standard':
-                logits, labels = self._inference_helper(
-                    model,
-                    self.data.edge_index,
-                    self.data.edge_type,
+                probs, labels = compute_mrr(
                     self.data.valid_edge_index,
                     self.data.valid_edge_type,
-                    return_logits=True,
+                    self.data,
+                    model,
+                    return_probs=True
                 )
             else:
                 raise ValueError(f"Unsupported evaluation method: {type_params['type']}")
             
-        # Convert logits to probabilities for isotonic regression
-        # Isotonic regression should be fit on bounded [0,1] probabilities, not unbounded logits
-        probs = torch.sigmoid(logits)
-        probs_np = probs.cpu().numpy().flatten()
-        labels_np = labels.cpu().numpy().flatten()
 
         iso_reg = IsotonicRegression(out_of_bounds='clip')
-        iso_reg.fit(probs_np, labels_np)
+        iso_reg.fit(probs, labels)
 
         self.logger.info("Isotonic Regression model fitted.")
         self.model.decoder.isotonic_regression_transform = iso_reg
@@ -662,7 +493,7 @@ class Pipeline(BasePipeline):
             z = model.encode(self.data.edge_index, self.data.edge_type)
         
         total_loss = torch.tensor(0.0, requires_grad=True)
-        num_edges = min(100, self.data.valid_edge_type.numel())  # Subsample for efficiency
+        num_edges = min(64, self.data.valid_edge_type.numel())  # Subsample for efficiency
         
         for i in range(num_edges):
             src = self.data.valid_edge_index[0, i].item()
