@@ -192,27 +192,23 @@ class DeepEnsemble(nn.Module):
         """
 
         outs = []
-        # 1. Collect Relational Embeddings needed for PTS later
-        all_rel_embs = [] 
 
         for k, model in enumerate(self.models):
             logits = model.decode(encoded_zs[k], eval_edge_index, eval_edge_type)
             probs = torch.sigmoid(logits)
             outs.append(probs)
             
-            if self.calibration == "input_dependent" and self.use_calibration:
-                all_rel_embs.append(model.decoder.rel_emb[eval_edge_type])
-            
         # Aggregation
         mean_pred = torch.stack(outs, dim=0).mean(dim=0)
         
-        # Prepare for calibration (convert prob -> logit)
-        eps = 1e-6
-        mean_pred_clamped = torch.clamp(mean_pred, min=eps, max=1-eps)
-        ensemble_logit = torch.logit(mean_pred_clamped)
-        
         # Calibration Logic
         if self.use_calibration:
+
+            # Prepare for calibration (convert prob -> logit)
+            eps = 1e-6
+            mean_pred_clamped = torch.clamp(mean_pred, min=eps, max=1-eps)
+            ensemble_logit = torch.logit(mean_pred_clamped)
+
             if self.calibration == "scalar":
                 score = ensemble_logit / self.temperature.to(self.device)
                 
@@ -250,8 +246,6 @@ class DeepEnsemble(nn.Module):
             # Get node embeddings
             z = model.encode(edge_index, edge_type)
             head_emb = z[edge_index[0]]
-            
-            # Get relation embeddings (assuming DistMult/standard decoder structure)
             rel_emb = model.decoder.rel_emb[edge_type]
             
             all_head_embs.append(head_emb)

@@ -110,7 +110,7 @@ def main():
         decoder_args = {
             'num_nodes': data.num_nodes,
             'num_relations': dataset.num_relations // 2,
-            'hidden_channels': model_config['encoder']['embedding_dim']
+            'embedding_dim': model_config['encoder']['embedding_dim']
         }
         
         # Create Deep Ensemble

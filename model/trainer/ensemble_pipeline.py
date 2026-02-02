@@ -49,7 +49,7 @@ class EnsemblePipeline(BasePipeline):
             
             # Evaluation
             if epoch % eval_frequency == 0:
-                valid_scores, test_scores = self.test_ensemble()
+                valid_scores, test_scores = self.test_ensemble(test=self.train_config['test'])
                 
                 # Compute ensemble diversity
                 diversity = self.compute_diversity()
@@ -68,6 +68,12 @@ class EnsemblePipeline(BasePipeline):
                 self.logger.info(f"Epoch {epoch}: Val Hits@1 = {valid_scores['hits@1']:.4f} ")
                 self.logger.info(f"Epoch {epoch}: Val Hits@3 = {valid_scores['hits@3']:.4f}")
                 self.logger.info(f"Epoch {epoch}: Val Hits@10 = {valid_scores['hits@10']:.4f}")
+                if test_scores is not None:
+                    self.logger.info(f"Epoch {epoch}: Test MRR = {test_scores['mrr']:.4f}")
+                    self.logger.info(f"Epoch {epoch}: Test Mean Rank = {test_scores['mean_rank']:.4f}")
+                    self.logger.info(f"Epoch {epoch}: Test Hits@1 = {test_scores['hits@1']:.4f} ")
+                    self.logger.info(f"Epoch {epoch}: Test Hits@3 = {test_scores['hits@3']:.4f}")
+                    self.logger.info(f"Epoch {epoch}: Test Hits@10 = {test_scores['hits@10']:.4f}")
 
                 self.writer.add_scalar('MRR/Validation', valid_scores['mrr'], epoch)
                 self.writer.add_scalar('Mean_Rank/Validation', valid_scores['mean_rank'], epoch)
@@ -169,12 +175,12 @@ class EnsemblePipeline(BasePipeline):
         return ensemble_losses
     
     @torch.no_grad()
-    def test_ensemble(self):
+    def test_ensemble(self,test = True):
         """Test ensemble with uncertainty quantification."""
 
         self.ensemble.eval()
         
-        scores = compute_mrr_ensemble(
+        valid_scores = compute_mrr_ensemble(
             self.data.edge_index,
             self.data.edge_type,
             self.data.valid_edge_index,
@@ -182,7 +188,16 @@ class EnsemblePipeline(BasePipeline):
             self.data,
             self.ensemble
         )
-        valid_scores = scores
+        if test:
+            test_scores = compute_mrr_ensemble(
+                self.data.edge_index,
+                self.data.edge_type,
+                self.data.test_edge_index,
+                self.data.test_edge_type,
+                self.data,
+                self.ensemble
+            )
+            return valid_scores, test_scores
          
         
         return valid_scores, None
@@ -351,8 +366,9 @@ class EnsemblePipeline(BasePipeline):
     
     def save_checkpoint(self, epoch, name=None):
         """Save ensemble checkpoint."""
-        checkpoint_dir = Path('checkpoints')
+        checkpoint_dir = Path('saved_models/experiment_2')
         checkpoint_dir.mkdir(exist_ok=True)
+        
         
         if name is None:
             name = f'{self.config.get_section("dataset")["name"]}_ensemble_checkpoint_epoch_{epoch}.pth'
