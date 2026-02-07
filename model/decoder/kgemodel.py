@@ -33,10 +33,11 @@ class KGEModel(torch.nn.Module):
         self.calibration = calibration
 
         if self.calibration == "scalar":
+            self.use_calibration = False 
             self.temperature = Parameter(torch.ones(1), requires_grad=False)
 
         elif self.calibration == "input_dependent":
-            self.use_input_dependent_temp = False 
+            self.use_calibration = False 
             self.temp_network = torch.nn.Sequential(
                 torch.nn.Linear(2 * embedding_dim, embedding_dim // 2),
                 torch.nn.ReLU(),
@@ -72,7 +73,7 @@ class KGEModel(torch.nn.Module):
         Returns:
             Temperature scalar for each query [batch_size, 1]
         """
-        if not self.use_input_dependent_temp:
+        if not self.use_calibration:
             # Return fixed temperature of 1.0
             return torch.ones(head_emb.size(0), 1, device=head_emb.device)
 

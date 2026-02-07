@@ -65,9 +65,13 @@ class BasePipeline:
             scores = compute_mrr_mc_dropout(self.data.edge_index, self.data.edge_type,
                                 valid_edge_index, valid_edge_type,
                                 self.data, model, mc_samples=mc_samples)
+            self.logger.info(f"Variance True: {scores['variance_true_mean']:.4f}")
+            self.logger.info(f"Variance False: {scores['variance_false_mean']:.4f}")
         elif type == 'ensemble':
             scores = compute_mrr_ensemble(self.data.edge_index, self.data.edge_type,
                                 valid_edge_index, valid_edge_type, self.data, model)
+            self.logger.info(f"Variance True: {scores['variance_true_mean']:.4f}")
+            self.logger.info(f"Variance False: {scores['variance_false_mean']:.4f}")
         else:
             raise ValueError(f"Unsupported evaluation type: {type}")
         
@@ -228,6 +232,8 @@ class BasePipeline:
         """Cleanup TensorBoard writer when pipeline is destroyed."""
         if hasattr(self, 'writer'):
             self.writer.close()
+
+    
 
     def _log_temperature_stats1(self, model):
         """Helper to log what the network is predicting."""

@@ -2,9 +2,11 @@
 Deep Ensemble wrapper for uncertainty estimation in knowledge graph link prediction.
 """
 import torch
+from torch import Tensor
 import torch.nn as nn
 from torch_geometric.nn import GAE
 from typing import Tuple
+import torch.nn.functional as F
 from torch.nn import Parameter
 
 
@@ -178,7 +180,7 @@ class DeepEnsemble(nn.Module):
         for i, state_dict in enumerate(checkpoint['models']):
             self.models[i].load_state_dict(state_dict)
 
-    def inference_optimised(self, encoded_zs: list, eval_edge_index, eval_edge_type):
+    def inference_optimised(self, encoded_zs: list[Tensor], eval_edge_index, eval_edge_type):
         """
         Optimized inference using pre-computed embeddings.
         
@@ -200,21 +202,14 @@ class DeepEnsemble(nn.Module):
             
         # Aggregation
         mean_pred = torch.stack(outs, dim=0).mean(dim=0)
-        
+        var_pred = torch.stack(outs, dim=0).var(dim=0)
         # Calibration Logic
         if self.use_calibration:
 
             # Prepare for calibration (convert prob -> logit)
-            eps = 1e-6
-            mean_pred_clamped = torch.clamp(mean_pred, min=eps, max=1-eps)
-            ensemble_logit = torch.logit(mean_pred_clamped)
 
             if self.calibration == "scalar":
-                score = ensemble_logit / self.temperature.to(self.device)
-                
-            elif self.calibration == "input_dependent":
-                
-                return mean_pred
+                score = mean_pred / self.temperature.to(self.device)
                 
             elif self.calibration == "isotonic_regression":
                 # Apply isotonic regression to PROBABILITIES
@@ -227,43 +222,7 @@ class DeepEnsemble(nn.Module):
         else:
             score = mean_pred # Return probabilities if calib disabled
             
-        return score
-    
-
-    def compute_input_dependent_temperature(self, edge_index, edge_type):
-        """
-        Computes temperature based on the MEAN embeddings of the ensemble.
-        
-        Args:
-            edge_index: The edge indices (2, num_edges)
-            edge_type: The edge types (num_edges)
-        """
-        # 1. Gather embeddings from all models
-        all_head_embs = []
-        all_rel_embs = []
-        
-        for model in self.models:
-            # Get node embeddings
-            z = model.encode(edge_index, edge_type)
-            head_emb = z[edge_index[0]]
-            rel_emb = model.decoder.rel_emb[edge_type]
-            
-            all_head_embs.append(head_emb)
-            all_rel_embs.append(rel_emb)
-
-        # 2. Compute the "Consensus Embedding" (Mean)
-        # Shape: [num_edges, hidden_channels]
-        mean_head_emb = torch.stack(all_head_embs).mean(dim=0) 
-        mean_rel_emb = torch.stack(all_rel_embs).mean(dim=0)
-        
-        # 3. Concatenate to create query features: [h; r]
-        query_emb = torch.cat([mean_head_emb, mean_rel_emb], dim=-1)
-        
-        # 4. Predict Temperature
-        # Add epsilon to ensure positivity
-        temperature = self.temp_network(query_emb) + 0.01 
-        
-        return temperature
+        return score,var_pred
 
     def predict_with_uncertainty(
         self, 
@@ -311,3 +270,9 @@ class DeepEnsemble(nn.Module):
                 return calibrated_logit, std_pred
             else:
                 return torch.sigmoid(calibrated_logit), std_pred
+            
+    def __str__(self) -> str:
+        str = ""
+        for name, param in self.named_parameters():
+            str += f"Parameter: {name}, Requires Grad: {param.requires_grad}\n"
+        return str

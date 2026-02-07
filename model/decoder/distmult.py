@@ -65,16 +65,15 @@ class DistMult(KGEModel):
         head, tail = X[edge_index[0]], X[edge_index[1]]
         rel = self.rel_emb[edge_type]
 
-        if self.calibration == "input_dependent":
+        if self.use_calibration and self.calibration == "input_dependent":
             temperature = self.compute_temperature(head, rel) 
-
             scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  
             
             scores = scores / temperature  
 
             return scores.squeeze(-1)  
             
-        elif self.calibration == "scalar":
+        elif self.use_calibration and self.calibration == "scalar":
             
             scores = torch.sum(head * rel * tail, dim=1, keepdim=True)  
             scores = scores / self.temperature 
@@ -113,8 +112,7 @@ class DistMult(KGEModel):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
-        
-        self.use_input_dependent_temp = True
+    
         optimizer = torch.optim.Adam(self.temp_network.parameters(), lr=0.01)
         self.temp_network.train()
         
@@ -143,7 +141,7 @@ class DistMult(KGEModel):
 
             if patience_counter >= patience:
                 break
-        
+        self.use_calibration = True
         self.temp_network.eval()
         print("Calibration Complete!")
         print(f"Final NLL Loss: {best_loss:.4f}")

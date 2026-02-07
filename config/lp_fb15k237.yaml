@@ -23,23 +23,24 @@ ensemble:
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 3
+    negative_sampling_ratio: 1
     edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
-    weight_decay: 0.0001
+    weight_decay: 0
   evaluation_frequency: 500
   early stopping:
     enabled: true
     patience: 5
     delta: 0.001
-  load_model: false
+  load_model: true
   save_model: true
-  checkpoint_path: ./checkpoints/FB15k-237_checkpoint_epoch_2000.pth
+  checkpoint_path: ./saved_models/experiment_1/FB15k-237_checkpoint_label_1_negative_sampling_1_edge_dropout_0.2_epoch_1500.pth
   label_smoothing: 
-    positive: 0.95
-    negative: 0.05
+    positive: 1
+    negative: 0
 calibration:
+  enabled: true
   type: standard
   mc_samples: 5
   method: scalar

@@ -7,31 +7,43 @@ model:
     type: RGCN
     hidden_layer_size: 500
     embedding_dim: 500
-    num_layers: 2
-    dropout: 0.1
-    num_bases : 4
+    dropout: 0.2
+    num_bases : 5
 
   decoder:
     type: DistMult
-    l2_penalty : 0.01
-
+    l2_penalty : 0.001
+    w_gain: false
+    b_init: false
+  
 ensemble:
   enabled: true
-  num_models: 5  
+  num_models: 5 
 
 training:
   epochs: 10000
   sampling:
     negative_sampling_ratio: 1
-    edge_dropout: 0.1
+    edge_dropout: 0
   optimiser:
     learning_rate: 0.01
-    weight_decay: 0.0001
+    weight_decay: 0
   evaluation_frequency: 500
-  save_frequency: 1000
   early stopping:
     enabled: true
-    patience: 10
+    patience: 5
     delta: 0.001
-  test_uncertainty: true
-  checkpoint_path: ./checkpoints/FB15k-237_ensemble_checkpoint_epoch_3000.pth
+  load_model: true
+  save_model: true
+  checkpoint_path: ./saved_models/experiment_2/FB15k-237_ensemble_checkpoint_scalar_epoch_1000.pth
+  test: true
+  label_smoothing: 
+    positive: 0.90
+    negative: 0.10
+calibration:
+  enabled: true
+  type: ensemble
+  mc_samples: 5
+  method: scalar
+  max_iters: 100
+  learning_rate: 0.01

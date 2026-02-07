@@ -33,7 +33,7 @@ training:
     enabled: true
     patience: 10
     delta: 0.001
-  load_model: false
+  load_model: true
   save_model: true
   checkpoint_path: ./saved_models/experiment_2/WN18RR_ensemble_checkpoint_neg_1.pth
   test: true
@@ -41,7 +41,7 @@ training:
     positive: 1
     negative: 0
 calibration:
-  enabled: true
+  enabled: false
   type: ensemble
   mc_samples: 5
   method: scalar

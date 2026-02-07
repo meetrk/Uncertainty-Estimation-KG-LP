@@ -1,10 +1,14 @@
+from unicodedata import name
+from xml.parsers.expat import model
 import torch
 from pathlib import Path
+
+from torch import device
 from model.trainer.basepipeline import BasePipeline
 from tqdm import tqdm
 import torch.nn.functional as F
 from utils.utils import negative_sampling, dropout_edges
-from utils.evaluation import  compute_uncertainty,compute_mrr_ensemble
+from utils.evaluation import compute_uncertainty,compute_mrr_ensemble
 
 
 class EnsemblePipeline(BasePipeline):
@@ -68,30 +72,33 @@ class EnsemblePipeline(BasePipeline):
                 self.logger.info(f"Epoch {epoch}: Val Hits@1 = {valid_scores['hits@1']:.4f} ")
                 self.logger.info(f"Epoch {epoch}: Val Hits@3 = {valid_scores['hits@3']:.4f}")
                 self.logger.info(f"Epoch {epoch}: Val Hits@10 = {valid_scores['hits@10']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val ECE= {valid_scores['ece']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val ACE= {valid_scores['ace']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val Brier Score = {valid_scores['brier_score']:.4f}")
+                self.logger.info(f"Epoch {epoch}: Val True Probability = {valid_scores['prob_true']}")
+                self.logger.info(f"Epoch {epoch}: Val Predicted Probability = {valid_scores['prob_pred']}")
+
                 if test_scores is not None:
                     self.logger.info(f"Epoch {epoch}: Test MRR = {test_scores['mrr']:.4f}")
                     self.logger.info(f"Epoch {epoch}: Test Mean Rank = {test_scores['mean_rank']:.4f}")
                     self.logger.info(f"Epoch {epoch}: Test Hits@1 = {test_scores['hits@1']:.4f} ")
                     self.logger.info(f"Epoch {epoch}: Test Hits@3 = {test_scores['hits@3']:.4f}")
                     self.logger.info(f"Epoch {epoch}: Test Hits@10 = {test_scores['hits@10']:.4f}")
-
+                    self.logger.info(f"Epoch {epoch}: Test ECE= {test_scores['ece']:.4f}")
+                    self.logger.info(f"Epoch {epoch}: Test ACE= {test_scores['ace']:.4f}")
+                    self.logger.info(f"Epoch {epoch}: Test Brier Score = {test_scores['brier_score']:.4f}")
+                    self.logger.info(f"Epoch {epoch}: Test True Probability = {test_scores['prob_true']}")
+                    self.logger.info(f"Epoch {epoch}: Test Predicted Probability = {test_scores['prob_pred']}")
+                
                 self.writer.add_scalar('MRR/Validation', valid_scores['mrr'], epoch)
                 self.writer.add_scalar('Mean_Rank/Validation', valid_scores['mean_rank'], epoch)
                 self.writer.add_scalar('Hits@1/Validation', valid_scores['hits@1'], epoch)
                 self.writer.add_scalar('Hits@3/Validation', valid_scores['hits@3'], epoch)
                 self.writer.add_scalar('Hits@10/Validation', valid_scores['hits@10'], epoch)
 
-                scores = self.test_uncertainty(
-                        self.ensemble,
-                        self.config.get_section('calibration')['method'],
-                        self.data.edge_index,
-                        self.data.edge_type,
-                        self.data.valid_edge_index,
-                        self.data.valid_edge_type,
-                    )
 
-                self.writer.add_scalar('MC_Uncertainty/Brier_Score', scores['brier_score'], epoch)
-                self.writer.add_scalar('MC_Uncertainty/ECE', scores['ece'], epoch)
+                self.writer.add_scalar('MC_Uncertainty/Brier_Score', valid_scores['brier_score'], epoch)
+                self.writer.add_scalar('MC_Uncertainty/ECE', valid_scores['ece'], epoch)
 
                 
                 # Check for improvement
@@ -118,8 +125,8 @@ class EnsemblePipeline(BasePipeline):
                     "val_hits@1": valid_scores["hits@1"],
                     "val_hits@3": valid_scores["hits@3"],
                     "val_hits@10": valid_scores["hits@10"],
-                    "brier_score": scores['brier_score'],
-                    "ece": scores['ece']
+                    "val_brier_score": valid_scores['brier_score'],
+                    "val_ece": valid_scores['ece']
 
                 })
         
@@ -315,7 +322,7 @@ class EnsemblePipeline(BasePipeline):
             model=self.ensemble,
             valid_edge_index=self.data.valid_edge_index,
             valid_edge_type=self.data.valid_edge_type)
-        
+                
         calibration_results = self.calibrate_pipeline(
             method=self.config.get_section('calibration')['method'],
             model=self.ensemble,
@@ -512,6 +519,7 @@ class EnsemblePipeline(BasePipeline):
             self.logger.info(f"Input-dependent temperature network calibrated for model {i+1}/{model.num_models} ")
             self.logger.info(f"Best NLL Loss for model {i+1}: {best_loss:.4f}")
         
+        self.ensemble.use_calibration = True
     
         # Compute and log final statistics
         final_stats = self._get_temperature_stats(
@@ -521,8 +529,6 @@ class EnsemblePipeline(BasePipeline):
         )
         self._log_temperature_stats(final_stats, prefix="  Final ")
         return final_stats
-
-
 
     def calibrate_scalar_temperature(self, model, max_iters=50, lr=0.01, type_params = None):
         """Calibrate scalar temperature parameter on validation set for ensemble.
@@ -540,13 +546,10 @@ class EnsemblePipeline(BasePipeline):
             dict: Calibrated temperature value
         """
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
-        
-        # Freeze all model parameters - only optimize temperature
         for member_model in model.models:
             for param in member_model.parameters():
                 param.requires_grad = False
 
-        # Enable calibration mode and make temperature trainable
         model.use_calibration = True
         model.temperature.requires_grad = True
         initial_temp = model.temperature.item()
@@ -613,12 +616,7 @@ class EnsemblePipeline(BasePipeline):
         self.logger.info(f"Temperature change: {final_temp - initial_temp:+.4f}")
         self.logger.info(f"Best NLL Loss: {best_loss:.4f}")
         self.logger.info("="*60)
-        
-        # Unfreeze all parameters in ensemble members
-        for member_model in model.models:
-            for param in member_model.parameters():
-                param.requires_grad = True
-        
+        model.use_calibration = True
         # Keep temperature as non-trainable after calibration
         model.temperature.requires_grad = False
         
