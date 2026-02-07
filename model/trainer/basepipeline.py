@@ -197,7 +197,7 @@ class BasePipeline:
         edge_dropout = self.train_config['sampling']['edge_dropout']
         if name is None:
             name = f'{self.config.get_section("dataset")["name"]}_checkpoint_label_{label_smoothing}_negative_sampling_{negative_sampling}_edge_dropout_{edge_dropout}_epoch_{epoch}.pth'
-        checkpoint_dir = Path('saved_models/experiment_1')
+        checkpoint_dir = Path('new_models/experiment_1')
         checkpoint_dir.mkdir(exist_ok=True)
 
         checkpoint_path = checkpoint_dir / name

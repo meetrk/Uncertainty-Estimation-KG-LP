@@ -9,7 +9,6 @@ from utils.evaluation import compute_mrr, compute_mrr_mc_dropout
 from utils.utils import dropout_edges
 from model.trainer.basepipeline import BasePipeline
 
-
 class Pipeline(BasePipeline):
 
     def __init__(self, model, data, config, logger):
@@ -161,8 +160,8 @@ class Pipeline(BasePipeline):
 
         self.model.train()
         # Ensure input-dependent temperature is disabled during training
-        if hasattr(self.model.decoder, 'use_input_dependent_temp'):
-            self.model.decoder.use_input_dependent_temp = False
+        if hasattr(self.model.decoder, 'use_calibration'):
+            self.model.decoder.use_calibration = False
         
         self.optimizer.zero_grad()
 
@@ -277,8 +276,8 @@ class Pipeline(BasePipeline):
         self._log_temperature_stats(stats, prefix="  Sample ")
         
         # Enable input-dependent temperature for this calibration method
-        if hasattr(model.decoder, 'use_input_dependent_temp'):
-            model.decoder.use_input_dependent_temp = True
+        if hasattr(model.decoder, 'use_calibration'):
+            model.decoder.use_calibration = True
         else:
             self.logger.error("Model decoder does not support input-dependent temperature!")
             return {}
@@ -330,7 +329,7 @@ class Pipeline(BasePipeline):
                     model, 
                     self.data.valid_edge_index, 
                     self.data.valid_edge_type, 
-                    num_samples=100
+                    num_samples=10
                 )
                 self._log_temperature_stats(stats, prefix="  Sample ")
             
@@ -375,9 +374,7 @@ class Pipeline(BasePipeline):
         """
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
         
-        # Ensure input-dependent temperature is disabled for scalar calibration
-        if hasattr(model.decoder, 'use_input_dependent_temp'):
-            model.decoder.use_input_dependent_temp = False
+        self.model.decoder.use_calibration = True
 
         # Freeze all parameters except temperature
         temp_params = self._freeze_non_temperature_params(
@@ -524,10 +521,27 @@ class Pipeline(BasePipeline):
                 logits = torch.stack(predictions).mean(dim=0)
             else:
                 logits = model.decode(z, eval_edge_index, eval_edge_type)
-            
-            # Compute NLL: Target is at index 0
-            log_probs = F.log_softmax(logits, dim=0)
-            loss = -log_probs[0]  # Negative log-likelihood of true target
+            k=10
+
+            pos_logit = logits[0]
+            neg_logits = logits[1:]
+
+            if len(neg_logits) > k:
+                neg_logits, _ = torch.sort(neg_logits, descending=True)
+
+                # indices = torch.linspace(0, len(neg_logits) - 1, steps=k).long()
+                target_values = torch.linspace(0, 1, steps=k,device=neg_logits.device)
+                indices = torch.searchsorted(neg_logits, target_values)
+                indices = torch.clamp(indices, max=len(neg_logits)-1)
+                sampled_neg_logits = neg_logits[indices]
+            else:
+                sampled_neg_logits = neg_logits
+
+            # 4. Binary Cross Entropy style loss (Contrastive)
+            pos_loss = -F.logsigmoid(pos_logit)
+            neg_loss = -F.logsigmoid(-sampled_neg_logits).sum()
+
+            loss = (pos_loss + neg_loss) / (k + 1)
             total_loss = total_loss + loss
         
         return total_loss / num_edges

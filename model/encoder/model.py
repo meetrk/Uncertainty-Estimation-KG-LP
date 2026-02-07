@@ -25,6 +25,7 @@ class RGCN(nn.Module):
         self.num_bases = model_config['encoder']['num_bases']
         self.dropout_ratio = model_config['encoder']['dropout']
         self.hidden_layer_size = model_config['encoder']['hidden_layer_size']
+        self.bases_enabled = model_config['encoder']['bases_enabled']
         self.num_nodes = num_nodes
         self.num_relations = num_relations
         self.mc_dropout = False
@@ -39,10 +40,16 @@ class RGCN(nn.Module):
         #     self.embedding_dim, self.hidden_layer_size, self.num_relations, num_bases=self.num_bases)
         # self.conv2 = RGCNLayer(
         #     self.hidden_layer_size, self.embedding_dim, self.num_relations, num_bases=self.num_bases)
-        self.conv1 = RGCNConv(self.embedding_dim, self.hidden_layer_size, self.num_relations,
-                              num_blocks=5)
-        self.conv2 = RGCNConv(self.hidden_layer_size, self.embedding_dim, self.num_relations,
-                              num_blocks=5)
+        if self.bases_enabled:
+            self.conv1 = RGCNConv(self.embedding_dim, self.hidden_layer_size, self.num_relations,
+                                num_bases=5)
+            self.conv2 = RGCNConv(self.hidden_layer_size, self.embedding_dim, self.num_relations,
+                                num_bases=5)
+        else:
+            self.conv1 = RGCNConv(self.embedding_dim, self.hidden_layer_size, self.num_relations,
+                                num_blocks=5)
+            self.conv2 = RGCNConv(self.hidden_layer_size, self.embedding_dim, self.num_relations,
+                                num_blocks=5)
 
         self.reset_parameters()
 
