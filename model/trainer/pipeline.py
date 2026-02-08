@@ -1,3 +1,4 @@
+import numpy
 from tqdm import tqdm
 from pathlib import Path
 from tqdm import tqdm
@@ -5,9 +6,12 @@ import torch.nn.functional as F
 import torch
 from model.trainer.basepipeline import BasePipeline
 from utils.utils import negative_sampling
-from utils.evaluation import compute_mrr, compute_mrr_mc_dropout
+from utils.evaluation import compute_mrr, compute_mrr_mc_dropout,create_filter_dicts,compute_uncertainty
 from utils.utils import dropout_edges
 from model.trainer.basepipeline import BasePipeline
+from model.calibrator.tempscaling import TemperatureScaling
+from model.calibrator.plattscaling import PlattScaling
+from model.calibrator.isotonic import IsotonicCalibrator
 
 class Pipeline(BasePipeline):
 
@@ -130,7 +134,13 @@ class Pipeline(BasePipeline):
             valid_edge_index=self.data.test_edge_index,
             valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
-        
+        self.test_uncertainty(
+            model=self.model,
+            test_edge_index=self.data.test_edge_index,
+            test_edge_type=self.data.test_edge_type,
+            params={'type': type, 'mc_samples': uncertainty_samples}
+        )
+
         if self.config.get_section('calibration')['enabled']:
             self.logger.info("Starting calibration on test set...")
             calibration_model = self.calibrate_pipeline(
@@ -144,7 +154,16 @@ class Pipeline(BasePipeline):
             model=self.model,
             valid_edge_index=self.data.test_edge_index,
             valid_edge_type=self.data.test_edge_type,
-            mc_samples=uncertainty_samples)
+            mc_samples=uncertainty_samples,
+            calibration_model=calibration_model
+            )
+            self.test_uncertainty(
+            model=self.model,
+            test_edge_index=self.data.test_edge_index,
+            test_edge_type=self.data.test_edge_type,
+            params={'type': type, 'mc_samples': uncertainty_samples, 'calibration_model': calibration_model}
+        )
+
 
         else:
             self.logger.info("Calibration not enabled; skipping calibration step.")
@@ -212,13 +231,12 @@ class Pipeline(BasePipeline):
         type_params = {
             'type': self.config.get_section('calibration').get('type', 'standard'),
             'mc_samples': self.config.get_section('calibration').get('mc_samples', 10),
-            'return_logits': True
         }
         self.logger.info(f"Uncertainty model type: {type_params}")
         if method == 'scalar':
             return self.calibrate_scalar_temperature(model, max_iters, lr, type_params)
-        elif method == 'input_dependent':
-            return self.calibrate_input_dependent_temperature(model, max_iters, lr, type_params)
+        elif method == 'platt_scaling':
+            return self.calibrate_platt_scaling_temperature(model, max_iters, lr, type_params)
         elif method == 'isotonic_regression':
             return self.calibrate_isotonic_regression(model, type_params)
         else:
@@ -248,7 +266,7 @@ class Pipeline(BasePipeline):
                 'max': temps.max().item()
             }
 
-    def calibrate_input_dependent_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
+    def calibrate_platt_scaling_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
         """Calibrate input-dependent temperature network on validation set.
         
         This method learns a small neural network that predicts per-query
@@ -266,97 +284,20 @@ class Pipeline(BasePipeline):
         """
 
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
+        
+        platt_model = PlattScaling()
 
-        stats = self._get_temperature_stats(
-                    model, 
-                    self.data.valid_edge_index, 
-                    self.data.valid_edge_type, 
-                    num_samples=100
-                )
-        self._log_temperature_stats(stats, prefix="  Sample ")
-        
-        # Enable input-dependent temperature for this calibration method
-        if hasattr(model.decoder, 'use_calibration'):
-            model.decoder.use_calibration = True
-        else:
-            self.logger.error("Model decoder does not support input-dependent temperature!")
-            return {}
-        
-        # Freeze all parameters except temperature network
-        temp_params = self._freeze_non_temperature_params(
-            model, 
-            lambda name: 'temp_network' in name or 'temperature' in name
-        )
-        
-        if not temp_params:
-            return {}
-        
-        optimizer = torch.optim.Adam(temp_params, lr=lr)
-        
-        self.logger.info("="*60)
-        self.logger.info("Starting Input-Dependent Temperature Calibration")
-        self.logger.info(f"Parameters to optimize: {len(temp_params)}")
-        self.logger.info(f"Max iterations: {max_iters}, Learning rate: {lr}")
-        self.logger.info("="*60)
+        inference_params = {**type_params, 'return_logits': True}
+        pos,neg = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, inference_params)
 
-        
-        # Training loop with early stopping
-        best_loss = float('inf')
-        patience, patience_counter = 5, 0
-        
-        for iteration in range(1, max_iters + 1):
-            # Optimization step
-            optimizer.zero_grad()
-            loss = self.compute_nll_loss_ranking(model, params=type_params)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(temp_params, max_norm=1.0)
-            optimizer.step()
-            
-            # Track best loss for early stopping
-            loss_val = loss.item()
-            if loss_val < best_loss:
-                best_loss = loss_val
-                patience_counter = 0
-            else:
-                patience_counter += 1
-            
-            # Periodic logging
-            if iteration % 10 == 0:
-                self.logger.info(f"Iter {iteration}/{max_iters}: NLL={loss_val:.4f}, Best={best_loss:.4f}")
-                
-                # Log sample temperature distribution
-                stats = self._get_temperature_stats(
-                    model, 
-                    self.data.valid_edge_index, 
-                    self.data.valid_edge_type, 
-                    num_samples=10
-                )
-                self._log_temperature_stats(stats, prefix="  Sample ")
-            
-            # Early stopping check
-            if patience_counter >= patience:
-                self.logger.info(f"Early stopping at iteration {iteration}")
-                break
-        
-        # Compute and log final statistics
-        final_stats = self._get_temperature_stats(
-            model,
-            self.data.valid_edge_index,
-            self.data.valid_edge_type
+        platt_model.set_parameters(
+            pos_logits=pos,
+            neg_logits=neg,
+            lr=lr,
+            max_iters=max_iters
         )
-        final_stats['final_loss'] = best_loss
-        
-        self.logger.info("="*60)
-        self.logger.info("Calibration Complete!")
-        self._log_temperature_stats(final_stats, prefix="Final ")
-        self.logger.info(f"Final NLL Loss: {best_loss:.4f}")
-        self.logger.info("="*60)
-        
-        # Unfreeze all parameters
-        for param in model.parameters():
-            param.requires_grad = True
-        
-        return final_stats
+
+        return platt_model
 
     def calibrate_scalar_temperature(self, model, max_iters=50, lr=0.01, type_params = None):
         """Calibrate single scalar temperature parameter on validation set.
@@ -373,56 +314,19 @@ class Pipeline(BasePipeline):
             float: Calibrated temperature value
         """
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
+    
         
-        self.model.decoder.use_calibration = True
+        calibrator = TemperatureScaling(init_temp=1.0).cuda()  
+        inference_params = {**type_params, 'return_logits': True}
+        pos,neg = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, inference_params)
 
-        # Freeze all parameters except temperature
-        temp_params = self._freeze_non_temperature_params(
-            model,
-            lambda name: 'temperature' in name
+        calibrator.set_temperature(
+            pos_logits=pos,
+            neg_logits=neg,
+            lr=lr,
+            max_iters=max_iters
         )
-        
-        if not temp_params:
-            self.logger.error("No temperature parameter found!")
-            return None
-        
-        initial_temp = model.decoder.temperature.item()
-        self.logger.info("="*60)
-        self.logger.info("Starting Scalar Temperature Calibration")
-        self.logger.info(f"Initial temperature: {initial_temp:.4f}")
-        self.logger.info("="*60)
-        
-        # Use LBFGS for scalar optimization (quasi-Newton method)
-        optimizer = torch.optim.LBFGS(temp_params, lr=lr, max_iter=max_iters)
-        
-        def eval_closure():
-            optimizer.zero_grad()
-            loss = self.compute_nll_loss_ranking(model, params=type_params)
-            loss.backward()
-            return loss
-        
-        # Optimize temperature
-        for iteration in range(1, max_iters + 1):
-            loss = optimizer.step(eval_closure)
-            current_temp = model.decoder.temperature.item()
-            if iteration % 10 == 0:
-                self.logger.info(
-                    f"Iter {iteration}/{max_iters}: "
-                    f"NLL={loss.item():.4f}, T={current_temp:.4f}"
-                )
-        
-        final_temp = model.decoder.temperature.item()
-        
-        self.logger.info("="*60)
-        self.logger.info("Calibration Complete!")
-        self.logger.info(f"Final temperature: {final_temp:.4f} (Δ={final_temp - initial_temp:+.4f})")
-        self.logger.info("="*60)
-        
-        # Unfreeze all parameters
-        for param in model.parameters():
-            param.requires_grad = True
-        
-        return final_temp
+        return calibrator
     
     def calibrate_isotonic_regression(self, model, type_params):
         """Calibrate using isotonic regression on validation set.
@@ -433,115 +337,90 @@ class Pipeline(BasePipeline):
         Returns:
             dict: Calibration results
         """
-        from sklearn.isotonic import IsotonicRegression
+        
 
         self.logger.info("Starting Isotonic Regression Calibration")
 
-        model.eval()
         with torch.no_grad():
-            if type_params['type'] == 'mc_dropout':
-                probs, labels = compute_mrr_mc_dropout(
-                    self.data.edge_index,
-                    self.data.edge_type,
-                    self.data.valid_edge_index,
-                    self.data.valid_edge_type,
-                    self.data,
-                    model,
-                    mc_samples=type_params['mc_samples'],
-                    return_probs=True
-                )
-            elif type_params['type'] == 'standard':
-                probs, labels = compute_mrr(
-                    self.data.valid_edge_index,
-                    self.data.valid_edge_type,
-                    self.data,
-                    model,
-                    return_probs=True
-                )
-            else:
-                raise ValueError(f"Unsupported evaluation method: {type_params['type']}")
-            
-
-        iso_reg = IsotonicRegression(out_of_bounds='clip')
-        iso_reg.fit(probs, labels)
-
+            out, labels = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, type_params)     
+           
+        out = out.cpu().numpy()
+        labels = labels.cpu().numpy()
+        
+        iso_reg = IsotonicCalibrator()
+        iso_reg.fit(out, labels)
         self.logger.info("Isotonic Regression model fitted.")
         self.model.decoder.isotonic_regression_transform = iso_reg
         self.model.decoder.use_calibration = True
         self.logger.info("Calibration Complete!")
 
-        return {"isotonic_model": iso_reg}
+        return iso_reg
 
 
 
-    def compute_nll_loss_ranking(self, model, params):
-        """
-        Compute NLL loss for calibration using ranking setup (same as MRR evaluation).
-        """
+    def inference(self, model,eval_edge_index, eval_edge_type, params):
+        model.eval()
         if params['type'] == 'mc_dropout':
-            model.encoder.mc_dropout = True
-            # Encode multiple times for MC dropout
-            all_z = []
+            out = []
+            gt = []
+            positives = []
+            negatives =[]
             for _ in range(params['mc_samples']):
+                model.encoder.mc_dropout = True
                 z = model.encode(self.data.edge_index, self.data.edge_type)
-                all_z.append(z)
-            model.encoder.mc_dropout = False
+                pos_out = model.decode(z, eval_edge_index, eval_edge_type)
+                neg_edge_index,neg_edge_type = negative_sampling(eval_edge_index, eval_edge_type, self.data.num_nodes, 1)
+                neg_out = model.decode(z, neg_edge_index, neg_edge_type)
+                positives.append(pos_out)
+                negatives.append(neg_out)
+                logits = torch.cat([pos_out, neg_out])
+                out.append(torch.sigmoid(logits))
+            if params.get('return_logits', False):
+                positives = torch.stack(positives, dim=0).mean(dim=0)
+                negatives = torch.stack(negatives, dim=0).mean(dim=0)
+                return positives, negatives
+            out = torch.stack(out, dim=0).mean(dim=0) 
+            gt = torch.cat([torch.full_like(eval_edge_index[0], 1), torch.full_like(eval_edge_index[0], 0)])
         else:
             z = model.encode(self.data.edge_index, self.data.edge_type)
+            pos_out = model.decode(z, eval_edge_index, eval_edge_type)
+            neg_edge_index,neg_edge_type = negative_sampling(eval_edge_index, eval_edge_type, self.data.num_nodes, 1)
+            neg_out = model.decode(z, neg_edge_index, neg_edge_type)  
+            if params.get('return_logits', False):
+                    return pos_out, neg_out
+            out = torch.cat([pos_out, neg_out])
+            gt = torch.cat([torch.full_like(pos_out, 1), torch.full_like(neg_out, 0)])    
+        return out, gt
+    
+    def test_uncertainty(self, model,test_edge_index, test_edge_type, params):
+
+        y_out, y_true = self.inference(model,test_edge_index, test_edge_type, params)
+        y_true = y_true.detach().cpu().numpy()
+
+        if 'calibration_model' in params and isinstance(params['calibration_model'], IsotonicCalibrator):
+            calibrator = params['calibration_model']
+            y_prob_calib = calibrator(y_out.detach().cpu().numpy())
+            self.logger.info("Uncertainty scores after calibration:")
+            uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
+        elif 'calibration_model' in params and isinstance(params['calibration_model'], TemperatureScaling):
+            calibrator = params['calibration_model'].eval()
+            y_out_calib = calibrator(y_out.detach()).detach().cpu().numpy()
+            y_prob_calib = torch.sigmoid(torch.tensor(y_out_calib)).numpy()
+            self.logger.info("Applied Platt Scaling calibration")
+            uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
+        elif 'calibration_model' in params and isinstance(params['calibration_model'], PlattScaling):
+            calibrator = params['calibration_model'].eval()
+            y_out_calib = calibrator(y_out.detach()).detach().cpu().numpy()
+            y_prob_calib = torch.sigmoid(torch.tensor(y_out_calib)).numpy()
+            uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
+        else:
+            y_prob = torch.sigmoid(y_out.detach()).cpu().numpy()
+            uncertainty_scores = compute_uncertainty(y_true, y_prob)
+
+        for metric, value in uncertainty_scores.items():
+            if isinstance(value, float):
+                self.logger.info(f"{metric}: {value:.4f}")
+            else:   
+                self.logger.info(f"{metric}: {value}")
         
-        total_loss = torch.tensor(0.0, requires_grad=True)
-        num_edges = min(64, self.data.valid_edge_type.numel())  # Subsample for efficiency
-        
-        for i in range(num_edges):
-            src = self.data.valid_edge_index[0, i].item()
-            dst = self.data.valid_edge_index[1, i].item()
-            rel = self.data.valid_edge_type[i].item()
-            
-            # --- TAIL PREDICTION (same filtering as MRR) ---
-            tail_mask = torch.ones(self.data.num_nodes, dtype=torch.bool)
-            for (heads, tails), types in [
-                (self.data.train_edge_index, self.data.train_edge_type),
-                (self.data.valid_edge_index, self.data.valid_edge_type),
-                (self.data.test_edge_index, self.data.test_edge_type),
-            ]:
-                tail_mask[tails[(heads == src) & (types == rel)]] = False
-            
-            tail = torch.arange(self.data.num_nodes)[tail_mask]
-            tail = torch.cat([torch.tensor([dst]), tail])
-            head = torch.full_like(tail, fill_value=src)
-            eval_edge_index = torch.stack([head, tail], dim=0)
-            eval_edge_type = torch.full_like(tail, fill_value=rel)
-            
-            # Decode
-            if params['type'] == 'mc_dropout':
-                predictions = []
-                for z_sample in all_z:
-                    pred = model.decode(z_sample, eval_edge_index, eval_edge_type)
-                    predictions.append(pred)
-                logits = torch.stack(predictions).mean(dim=0)
-            else:
-                logits = model.decode(z, eval_edge_index, eval_edge_type)
-            k=10
-
-            pos_logit = logits[0]
-            neg_logits = logits[1:]
-
-            if len(neg_logits) > k:
-                neg_logits, _ = torch.sort(neg_logits, descending=True)
-
-                # indices = torch.linspace(0, len(neg_logits) - 1, steps=k).long()
-                target_values = torch.linspace(0, 1, steps=k,device=neg_logits.device)
-                indices = torch.searchsorted(neg_logits, target_values)
-                indices = torch.clamp(indices, max=len(neg_logits)-1)
-                sampled_neg_logits = neg_logits[indices]
-            else:
-                sampled_neg_logits = neg_logits
-
-            # 4. Binary Cross Entropy style loss (Contrastive)
-            pos_loss = -F.logsigmoid(pos_logit)
-            neg_loss = -F.logsigmoid(-sampled_neg_logits).sum()
-
-            loss = (pos_loss + neg_loss) / (k + 1)
-            total_loss = total_loss + loss
-        
-        return total_loss / num_edges
+        return uncertainty_scores

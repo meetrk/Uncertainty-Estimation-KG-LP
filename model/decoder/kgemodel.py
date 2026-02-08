@@ -30,61 +30,12 @@ class KGEModel(torch.nn.Module):
         self.num_relations = num_relations
         self.embedding_dim = embedding_dim
         self.rel_emb = Parameter(torch.FloatTensor(num_relations, embedding_dim))
-        self.calibration = calibration
-
-        if self.calibration == "scalar":
-            self.use_calibration = False 
-            self.temperature = Parameter(torch.ones(1), requires_grad=False)
-
-        elif self.calibration == "input_dependent":
-            self.use_calibration = False 
-            self.temp_network = torch.nn.Sequential(
-                torch.nn.Linear(2 * embedding_dim, embedding_dim // 2),
-                torch.nn.ReLU(),
-                torch.nn.Linear(embedding_dim // 2, 1),
-                torch.nn.Softplus()  
-            )
-            # Initialize to output ~1.0 (no scaling) initially
-            for param in self.temp_network.parameters():
-                param.data.normal_(0, 0.01)
-        elif self.calibration == "isotonic_regression":
-            self.use_calibration = False 
-            self.isotonic_regression_transform = None  # To be set during calibration
-        elif self.calibration == "none":
-            self.temperature = Parameter(torch.ones(1), requires_grad=False)
-        else:
-            raise ValueError("Unsupported calibration method specified")
-
-
-
 
 
     def reset_parameters(self):
         r"""Resets all learnable parameters of the module."""
         # self.rel_emb.reset_parameters()
     
-    def compute_temperature(self, head_emb: Tensor, rel_emb: Tensor) -> Tensor:
-        r"""Computes input-dependent temperature for each query (h, r).
-        
-        Args:
-            head_emb: Head entity embeddings [batch_size, embedding_dim]
-            rel_emb: Relation embeddings [batch_size, embedding_dim]
-            
-        Returns:
-            Temperature scalar for each query [batch_size, 1]
-        """
-        if not self.use_calibration:
-            # Return fixed temperature of 1.0
-            return torch.ones(head_emb.size(0), 1, device=head_emb.device)
-
-        # Concatenate head and relation embeddings
-        query_emb = torch.cat([head_emb, rel_emb], dim=-1)  # [batch_size, 2 * embedding_dim]
-        
-        # Predict temperature (add small epsilon to avoid division by zero)
-        temperature = self.temp_network(query_emb) + 0.01  # [batch_size, 1]
-        
-        return temperature
-
 
     def forward(
         self,

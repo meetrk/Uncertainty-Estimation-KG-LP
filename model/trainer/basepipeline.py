@@ -47,31 +47,27 @@ class BasePipeline:
         raise NotImplementedError
 
     @torch.no_grad()
-    def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type):
+    def inference(self, model, eval_edge_index, eval_edge_type, params):
         raise NotImplementedError
 
 
     @torch.no_grad()
-    def test_link_pred(self, type, model, valid_edge_index, valid_edge_type,  mc_samples=10):
+    def test_link_pred(self, type, model, valid_edge_index, valid_edge_type,  mc_samples=10, calibration_model=None):
 
         self.logger.info("Starting link prediction evaluation...")
         self.logger.info(f"Uncertainty Estimation Type : {type}")
         self.logger.info(f"Calibration Method : {self.config.get_section('calibration')['method']}")
         model.eval()
         if type == 'standard':
-            scores = compute_mrr(valid_edge_index, valid_edge_type ,self.data, model)   
+            scores = compute_mrr(valid_edge_index, valid_edge_type ,self.data, model, calibration_model=calibration_model)   
 
         elif type == 'mc_dropout':
             scores = compute_mrr_mc_dropout(self.data.edge_index, self.data.edge_type,
                                 valid_edge_index, valid_edge_type,
-                                self.data, model, mc_samples=mc_samples)
-            self.logger.info(f"Variance True: {scores['variance_true_mean']:.4f}")
-            self.logger.info(f"Variance False: {scores['variance_false_mean']:.4f}")
+                                self.data, model, mc_samples=mc_samples, calibration_model=calibration_model)
         elif type == 'ensemble':
             scores = compute_mrr_ensemble(self.data.edge_index, self.data.edge_type,
                                 valid_edge_index, valid_edge_type, self.data, model)
-            self.logger.info(f"Variance True: {scores['variance_true_mean']:.4f}")
-            self.logger.info(f"Variance False: {scores['variance_false_mean']:.4f}")
         else:
             raise ValueError(f"Unsupported evaluation type: {type}")
         
@@ -81,13 +77,9 @@ class BasePipeline:
         self.logger.info(f"Hits@3 = {scores['hits@3']:.4f} ")
         self.logger.info(f"Hits@10 = {scores['hits@10']:.4f}")
         
-        self.logger.info(f"Brier Score: {scores['brier_score']:.4f}")
-        self.logger.info(f"ECE: {scores['ece']:.4f}")
-        self.logger.info(f"ACE: {scores['ace']:.4f}")
-        self.logger.info(f"Probability True: {scores['prob_true']}")
-        self.logger.info(f"Probability Predicted: {scores['prob_pred']}")
-        
         return scores
+    
+   
 
     def train(self):
         """
@@ -102,7 +94,7 @@ class BasePipeline:
         
 
     @torch.no_grad()
-    def test_uncertainty(self, model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples):
+    def test_uncertainty(self, model, test_edge_index, test_edge_type, params):
         raise NotImplementedError
 
 
