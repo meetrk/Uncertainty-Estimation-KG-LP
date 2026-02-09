@@ -3,11 +3,15 @@ from xml.parsers.expat import model
 import torch
 from pathlib import Path
 
-from torch import device
+
+from model.ensemble.deep_ensemble import DeepEnsemble
 from model.trainer.basepipeline import BasePipeline
 from tqdm import tqdm
 import torch.nn.functional as F
 from utils.utils import negative_sampling, dropout_edges
+from model.calibrator.tempscaling import TemperatureEnsemble
+from model.calibrator.plattscaling import PlattScalingEnsemble, PlattScalingMCDropout
+from model.calibrator.isotonic import IsotonicCalibrator
 from utils.evaluation import compute_uncertainty,compute_mrr_ensemble
 
 
@@ -209,132 +213,51 @@ class EnsemblePipeline(BasePipeline):
         
         return valid_scores, None
     
-    def _inference_helper(self, model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False, apply_isotonic=False, enable_grad=False):
-        """Helper method for standard inference without gradient control.
-        
-        Args:
-            return_logits: If True, return raw logits; if False, return sigmoid probabilities
-            apply_isotonic: If True, apply isotonic regression calibration (only for uncertainty evaluation)
-        """
-
-        # Get predictions with uncertainty
-        mean_pred, std_pred = model.predict_with_uncertainty(
-            edge_index,
-            edge_type,
-            test_edge_index,
-            test_edge_type,
-            return_logits=return_logits,
-            enable_grad=enable_grad
-        )
-        
-        # Also get negative samples for evaluation
-        neg_edge_index, neg_edge_type = negative_sampling( test_edge_index, test_edge_type,self.data.num_nodes, 10)
-        neg_mean_pred, neg_std_pred = model.predict_with_uncertainty(
-            edge_index,
-            edge_type,
-            neg_edge_index,
-            neg_edge_type,
-            return_logits=return_logits,
-            enable_grad=enable_grad
-        )
-        
-        # Combine positive and negative predictions
-        all_mean_pred = torch.cat([mean_pred, neg_mean_pred])
-        all_std_pred = torch.cat([std_pred, neg_std_pred])
-        labels = torch.cat([
-            torch.ones_like(mean_pred),
-            torch.zeros_like(neg_mean_pred)
-        ])
-        
-    
-        if apply_isotonic and hasattr(model, 'isotonic_regression_transform') and model.isotonic_regression_transform is not None:
-            if return_logits:
-                all_mean_pred = torch.sigmoid(all_mean_pred)
-            
-            device = all_mean_pred.device
-           
-            preds_np = all_mean_pred.cpu().numpy().flatten()
-           
-            calibrated_preds_np = model.isotonic_regression_transform.predict(preds_np)
-            all_mean_pred = torch.tensor(calibrated_preds_np, dtype=torch.float32, device=device).reshape(all_mean_pred.shape)
-            
-            if return_logits:
-                eps = 1e-6
-                all_mean_pred = torch.clamp(all_mean_pred, min=eps, max=1-eps)
-                all_mean_pred = torch.logit(all_mean_pred)
-
-        return all_mean_pred, labels
-    
-    @torch.no_grad()
-    def inference(self, model, edge_index, edge_type, test_edge_index, test_edge_type):
-        """Standard inference with gradients disabled."""
-        return self._inference_helper(model, edge_index, edge_type, test_edge_index, test_edge_type, return_logits=False)
 
 
-    @torch.no_grad()
-    def test_uncertainty(self,model, method, edge_index, edge_type, test_edge_index, test_edge_type, uncertainty_samples = None):
-        """
-        Evaluate uncertainty on test set using ensemble variance.
-        
-        Returns uncertainty metrics: Brier score, ECE, etc.
-        """
-        # Check if isotonic regression should be applied
-        use_isotonic = (hasattr(model, 'isotonic_regression_transform') and 
-                       model.isotonic_regression_transform is not None and
-                       hasattr(model, 'use_calibration') and
-                       model.use_calibration)
-        
-        all_mean_pred, labels = self._inference_helper(
-                model,
-                edge_index,
-                edge_type,
-                test_edge_index,
-                test_edge_type,
-                return_logits=False,
-                apply_isotonic=use_isotonic,
-                enable_grad=False
-            )
-        
-        labels = labels.flatten()
-        all_mean_pred = all_mean_pred.flatten()
-        
-        # Compute uncertainty metrics
-        scores = compute_uncertainty(labels, all_mean_pred)
-    
-        self.logger.info(f"Ensemble Uncertainty - Brier Score: {scores['brier_score']:.4f}")
-        self.logger.info(f"Ensemble Uncertainty - ECE: {scores['ece']:.4f}")
-        self.logger.info(f"Ensemble Uncertainty - ACE: {scores['ace']:.4f}")
-        self.logger.info(f"Probability True: {scores['prob_true']}")
-        self.logger.info(f"Probability Predicted: {scores['prob_pred']}")
-
-        return scores
 
     def load_pipeline(self, checkpoint_path, type,save):
         """Load ensemble pipeline from checkpoint."""
         self.load_checkpoint(checkpoint_path, load_optimizer=False)
         self.logger.info("Checkpoint loaded. Evaluating ensemble uncertainty on test set...")
-        self.logger.info(f"Calibration applied: {self.ensemble.use_calibration}")
 
         assert type == 'ensemble', "Loaded model is not an ensemble."
 
         scores = self.test_link_pred(
             type=type,
             model=self.ensemble,
-            valid_edge_index=self.data.valid_edge_index,
-            valid_edge_type=self.data.valid_edge_type)
-                
-        calibration_results = self.calibrate_pipeline(
-            method=self.config.get_section('calibration')['method'],
-            model=self.ensemble,
-            max_iters=self.config.get_section('calibration').get('max_iters', 50),
-            lr=self.config.get_section('calibration').get('learning_rate', 0.01)
-        )
+            valid_edge_index=self.data.test_edge_index,
+            valid_edge_type=self.data.test_edge_type)
+        uncertainty_scores = self.test_uncertainty(
+                model=self.ensemble,
+                test_edge_index=self.data.test_edge_index,
+                test_edge_type=self.data.test_edge_type,
+                params={
+                    'calibration_model': None,
+                })
+        
+        if save:
+            calibration_model = self.calibrate_pipeline(
+                method=self.config.get_section('calibration')['method'],
+                model=self.ensemble,
+                max_iters=self.config.get_section('calibration').get('max_iters', 50),
+                lr=self.config.get_section('calibration').get('learning_rate', 0.01)
+            )
 
-        scores = self.test_link_pred(
-            type=type,
-            model=self.ensemble,
-            valid_edge_index=self.data.valid_edge_index,
-            valid_edge_type=self.data.valid_edge_type)
+            scores = self.test_link_pred(
+                type=type,
+                model=self.ensemble,
+                valid_edge_index=self.data.test_edge_index,
+                valid_edge_type=self.data.test_edge_type,
+                calibration_model=calibration_model)
+
+            uncertainty_scores = self.test_uncertainty(
+                model=self.ensemble,
+                test_edge_index=self.data.test_edge_index,
+                test_edge_type=self.data.test_edge_type,
+                params={
+                    'calibration_model': calibration_model,
+                })
         
         if save:
             self.save_checkpoint(epoch=0, name=f'calibrated_{Path(checkpoint_path).name}')
@@ -428,108 +351,31 @@ class EnsemblePipeline(BasePipeline):
         self.logger.info(f"Uncertainty model type: {type_params}")
         if method == 'scalar':
             return self.calibrate_scalar_temperature(model, max_iters, lr, type_params)
-        elif method == 'input_dependent':
-            return self.calibrate_input_dependent_temperature(model, max_iters, lr, type_params)
+        elif method == 'platt_scaling':
+            return self.calibrate_platt_scaling_temperature(model, max_iters, lr, type_params)
         elif method == 'isotonic_regression':
             return self.calibrate_isotonic_regression(model)
         else:
             raise ValueError(f"Unsupported calibration method: {method}")
     
-    def _get_temperature_stats(self, model, edge_index, edge_type, num_samples=None):
-        """Compute temperature statistics for validation samples.
-        
-        Returns:
-            dict: Temperature statistics (mean, std, min, max)
-        """
-        with torch.no_grad():
-            all_temps = []
-            for member_model in model.models:
-                z = member_model.encode(self.data.edge_index, self.data.edge_type)
-                if num_samples is not None:
-                    sample_edge_index = edge_index[:, :num_samples]
-                    sample_edge_type = edge_type[:num_samples]
-                else:
-                    sample_edge_index = edge_index
-                    sample_edge_type = edge_type
-                
-                heads = z[sample_edge_index[0]]
-                rels = member_model.decoder.rel_emb[sample_edge_type]
-                temps = member_model.decoder.compute_temperature(heads, rels)
-                all_temps.append(temps)
-            
-            temps = torch.cat(all_temps, dim=0)
-            
-            return {
-                'mean': temps.mean().item(),
-                'std': temps.std().item(),
-                'min': temps.min().item(),
-                'max': temps.max().item()
-            }
 
-    def compute_nll_loss(self, model, params = None):
-        """
-        Compute Negative Log-Likelihood loss for calibration.
-        
-        Args:
-            model: The GAE model
-            params: Parameters dict with 'type' and 'mc_samples'
-            
-        Returns:
-            NLL loss value
-        """
-        logits, labels = self._inference_helper(
-                model, 
-                self.data.edge_index,
-                self.data.edge_type,
-                self.data.valid_edge_index,
-                self.data.valid_edge_type,
-                return_logits=True,
-                enable_grad=True
-            )
-        
-        nll_loss = F.binary_cross_entropy_with_logits(logits, labels)
-        
-        return nll_loss
-
-    def calibrate_input_dependent_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
+    def calibrate_platt_scaling_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
         
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
 
 
-        stats = self._get_temperature_stats(
-                    model, 
-                    self.data.valid_edge_index, 
-                    self.data.valid_edge_type, 
-                    num_samples=100
-                )
-        self._log_temperature_stats(stats, prefix="  Sample ")
-        
-        model.use_calibration = True
-        
-        for i, member_model in enumerate(model.models):
-            # Pass encoder function instead of pre-computed embeddings
-            encoder_fn = lambda edge_idx, edge_typ: member_model.encode(edge_idx, edge_typ)
-            best_loss = member_model.decoder.calibrate(
-                encoder_fn,
-                self.data.edge_index,
-                self.data.edge_type,
-                self.data.valid_edge_index,
-                self.data.valid_edge_type
-            )
-            self.logger.info(f"Input-dependent temperature network calibrated for model {i+1}/{model.num_models} ")
-            self.logger.info(f"Best NLL Loss for model {i+1}: {best_loss:.4f}")
-        
-        self.ensemble.use_calibration = True
-    
-        # Compute and log final statistics
-        final_stats = self._get_temperature_stats(
-            model,
-            self.data.valid_edge_index,
-            self.data.valid_edge_type
+        platt_model = PlattScalingEnsemble(mc_samples=type_params['mc_samples']).cuda()
+        inference_params = {**type_params, 'return_logits': True, 'num_negatives': 1}
+        pos,neg = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, inference_params)
+        pos = torch.stack(pos, dim=1).mean(dim=1) 
+        neg = torch.stack(neg, dim=1).mean(dim=1) 
+        platt_model.set_parameters(
+                    pos_logits=pos,
+                    neg_logits=neg,
+                    lr=lr,
+                    max_iters=max_iters
         )
-        self._log_temperature_stats(final_stats, prefix="  Final ")
-        return final_stats
-
+        return platt_model
     def calibrate_scalar_temperature(self, model, max_iters=50, lr=0.01, type_params = None):
         """Calibrate scalar temperature parameter on validation set for ensemble.
         
@@ -545,82 +391,23 @@ class EnsemblePipeline(BasePipeline):
         Returns:
             dict: Calibrated temperature value
         """
-        self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
-        for member_model in model.models:
-            for param in member_model.parameters():
-                param.requires_grad = False
+   
+        calibrator = TemperatureEnsemble(init_temp=1.0).cuda()
 
-        model.use_calibration = True
-        model.temperature.requires_grad = True
-        initial_temp = model.temperature.item()
+        inference_params = {**type_params, 'return_logits': True, 'num_negatives': 1}
+        pos,neg = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, inference_params)
+
+        pos = torch.stack(pos, dim=1).mean(dim=1) 
+        neg = torch.stack(neg, dim=1).mean(dim=1)  
         
-        self.logger.info("="*60)
-        self.logger.info("Starting Scalar Temperature Calibration for Ensemble")
-        self.logger.info(f"Number of models: {len(model.models)}")
-        self.logger.info(f"Initial temperature: {initial_temp:.4f}")
-        self.logger.info("="*60)
-        
-        # Use Adam optimizer for temperature calibration
-        optimizer = torch.optim.Adam([model.temperature], lr=lr)
-        
-        # Training loop with early stopping
-        best_loss = float('inf')
-        best_temp = initial_temp
-        patience, patience_counter = 5, 0
-        
-        iterations = tqdm(range(1, max_iters + 1), desc="Calibrating Temperature")
-        for iteration in iterations:
-            optimizer.zero_grad()
-            loss = self.compute_nll_loss(model, params=type_params)
-            loss.backward()
-            
-            # Clip gradients to prevent instability
-            torch.nn.utils.clip_grad_norm_([model.temperature], max_norm=10.0)
-            optimizer.step()
-            
-            # Constrain temperature to reasonable range [0.1, 10.0]
-            with torch.no_grad():
-                model.temperature.clamp_(0.1, 10.0)
-            
-            # Track best loss and temperature
-            loss_val = loss.item()
-            current_temp = model.temperature.item()
-            
-            if loss_val < best_loss:
-                best_loss = loss_val
-                best_temp = current_temp
-                patience_counter = 0
-            else:
-                patience_counter += 1
-            
-            if iteration % 10 == 0:
-                self.logger.info(
-                    f"Iter {iteration}/{max_iters}: "
-                    f"NLL={loss_val:.4f}, Best={best_loss:.4f}, T={current_temp:.4f}, Best_T={best_temp:.4f}"
-                )
-            
-            # Early stopping check
-            if patience_counter >= patience:
-                self.logger.info(f"Early stopping at iteration {iteration}")
-                break
-        
-        # Set to best temperature found
-        with torch.no_grad():
-            model.temperature.data = torch.tensor([best_temp], device=model.temperature.device)
-        
-        final_temp = model.temperature.item()
-        
-        self.logger.info("="*60)
-        self.logger.info("Calibration Complete!")
-        self.logger.info(f"Final temperature: {final_temp:.4f}")
-        self.logger.info(f"Temperature change: {final_temp - initial_temp:+.4f}")
-        self.logger.info(f"Best NLL Loss: {best_loss:.4f}")
-        self.logger.info("="*60)
-        model.use_calibration = True
-        # Keep temperature as non-trainable after calibration
-        model.temperature.requires_grad = False
-        
-        return {'temperature': final_temp, 'best_nll': best_loss}
+        calibrator.set_temperature(
+            pos_logits=pos,
+            neg_logits=neg,
+            lr=lr,
+            max_iters=max_iters
+        )
+
+        return calibrator
     
     def calibrate_isotonic_regression(self, model):
         """Calibrate using isotonic regression on validation set for ensemble.
@@ -634,35 +421,91 @@ class EnsemblePipeline(BasePipeline):
         Returns:
             dict: Calibration results
         """
-        from sklearn.isotonic import IsotonicRegression
-        import numpy as np
+
 
         self.logger.info("Starting Isotonic Regression Calibration for Ensemble")
 
         # Get ensemble predictions (raw logits) and labels
         model.eval()
         with torch.no_grad():
-            probs, labels = self._inference_helper(
-                model,
-                self.data.edge_index,
-                self.data.edge_type,
-                self.data.valid_edge_index,
-                self.data.valid_edge_type,
-                return_logits=False  
-            )
-        probs_np = probs.cpu().numpy().flatten()
-        labels_np = labels.cpu().numpy().flatten()
+            out, labels = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, {'return_logits': False, 'num_negatives': 10})    
 
-        # Fit isotonic regression on ensemble mean predictions
-        iso_reg = IsotonicRegression(out_of_bounds='clip')
-        iso_reg.fit(probs_np, labels_np)
+        probab = torch.sigmoid(out)
+        probab = probab.cpu().numpy()
+        labels = labels.cpu().numpy()
 
-        self.logger.info("Isotonic Regression model fitted on ensemble predictions.")
+        print(f"Uncalibrated probabilities (first 10): {probab[:10]}")
+        print(f"True labels (first 10): {labels[:10]}")
+        iso_reg = IsotonicCalibrator(out_of_bounds='clip')
+        iso_reg.fit(probab, labels)
+
+        return iso_reg
+
+
+    @torch.no_grad()
+    def test_uncertainty(self,model, test_edge_index, test_edge_type, params):
+        """
+        Evaluate uncertainty on test set using ensemble variance.
         
- 
-        model.isotonic_regression_transform = iso_reg
-        model.use_calibration = True
-        
-        self.logger.info("Calibration Complete!")
+        Returns uncertainty metrics: Brier score, ECE, etc.
+        """
+        params = {**params, 'num_negatives': 1}
+        y_out, y_true = self.inference(model,test_edge_index, test_edge_type, params)
+        y_true = y_true.detach().cpu().numpy()
 
-        return {"isotonic_model": iso_reg}
+        if 'calibration_model' in params and isinstance(params['calibration_model'], IsotonicCalibrator):
+
+            calibrator = params['calibration_model']
+            y_out = torch.sigmoid(y_out.detach()).cpu().numpy()
+            y_prob_calib = calibrator.predict(y_out)
+            self.logger.info("Uncertainty scores after calibration:")
+            uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
+        elif 'calibration_model' in params and isinstance(params['calibration_model'], PlattScalingEnsemble):
+            calibrator = params['calibration_model'].eval()
+            y_prob_calib = calibrator(y_out).detach().cpu().numpy()
+            self.logger.info("Applied Platt Scaling with Ensemble calibration")
+            uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
+        elif 'calibration_model' in params and isinstance(params['calibration_model'], TemperatureEnsemble):
+            calibrator = params['calibration_model'].eval()
+            y_out_calib = calibrator(y_out.detach()).detach().cpu().numpy()
+            print("Applied Scalar Temperature Scaling calibration")
+            uncertainty_scores = compute_uncertainty(y_true, y_out_calib)
+        else:
+            y_prob = torch.sigmoid(y_out.detach()).cpu().numpy()
+            # print(f"Calibrated probabilities (first 10): {y_prob[:10]}\n Uncalibrated probabilities (first 10): {y_out.detach().cpu().numpy()[:10]}")
+            uncertainty_scores = compute_uncertainty(y_true, y_prob)
+
+
+        for metric, value in uncertainty_scores.items():
+            if isinstance(value, float):
+                self.logger.info(f"{metric}: {value:.4f}")
+            else:   
+                self.logger.info(f"{metric}: {value}")
+        
+        return uncertainty_scores
+    
+    @torch.no_grad()
+    def inference(self, model: DeepEnsemble, eval_edge_index, eval_edge_type, params):
+
+        model.eval()
+        neg_edge_index, neg_edge_type = negative_sampling(eval_edge_index, eval_edge_type, self.data.num_nodes, params.get('num_negatives', 1))
+        
+        combined_edge_index = torch.cat([eval_edge_index, neg_edge_index], dim=1)
+        combined_edge_type = torch.cat([eval_edge_type, neg_edge_type])
+        num_pos = eval_edge_index.size(1)
+
+        z_all = model.encode(self.data.edge_index, self.data.edge_type)
+        combined_out = model.decode(z_all, combined_edge_index, combined_edge_type) 
+        
+        positives = [out[:num_pos] for out in combined_out]
+        negatives = [out[num_pos:] for out in combined_out]
+        
+        if params.get('return_logits', False): 
+            return positives, negatives 
+        
+        out = torch.cat([torch.stack(positives, dim=0).mean(dim=0), torch.stack(negatives, dim=0).mean(dim=0)], dim=0)  # Shape: (num_samples, num_models)
+        gt = torch.cat([torch.full_like(eval_edge_type, 1), torch.full_like(neg_edge_type, 0)])
+
+        return out, gt
+            
+

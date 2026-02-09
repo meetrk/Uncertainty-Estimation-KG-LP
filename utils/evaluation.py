@@ -3,13 +3,11 @@ Evaluation metrics and utilities for knowledge graph link prediction.
 """
 import torch
 import numpy as np
-from typing import  List
-from torch import softmax
-
 from tqdm import tqdm
 from torchmetrics.classification.calibration_error import BinaryCalibrationError
 from sklearn.metrics import brier_score_loss
 from model.ensemble.deep_ensemble import DeepEnsemble
+from model.calibrator.isotonic import IsotonicCalibrator
 from netcal.metrics import ACE
 from sklearn.calibration import calibration_curve
 import torch.nn.functional as F
@@ -58,7 +56,7 @@ def compute_rank(ranks):
     return (optimistic + pessimistic).float() * 0.5
 
 @torch.no_grad()
-def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_type, data, models: DeepEnsemble):
+def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_type, data, models: DeepEnsemble,calibration_model=None):
     """
     Optimized MRR computation:
     1. Pre-computes node embeddings (Z) once.
@@ -73,10 +71,7 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
     head_filter, tail_filter = create_filter_dicts(data)
     
     ranks = []
-    y_probab = []
-    y_true = [] 
-    variance_true = []
-    variance_false = []
+
     # Pre-allocate a mask tensor to reuse memory
     mask_container = torch.ones(num_nodes, dtype=torch.bool, device=device)
     all_nodes = torch.arange(num_nodes, device=device)
@@ -110,18 +105,15 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
         # Use optimized inference
         probs,variance = models.inference_optimised(encoded_zs, eval_edge_index, eval_edge_type)
 
+        if calibration_model is not None:
+            if isinstance(calibration_model, IsotonicCalibrator):
+                probs = torch.sigmoid(probs)
+                probs = calibration_model.predict(probs.detach().cpu().numpy())
+                probs = torch.from_numpy(probs).float()
+                print("Applied Isotonic Regression ")
+            else:
+                probs = torch.sigmoid(calibration_model(probs))
         ranks.append(compute_rank(probs))
-        
-        y_true.append(1)  
-        y_probab.append(probs[0].item())
-        variance_true.append(variance[0].item())
-        k = 10
-        indices = torch.randperm(len(probs))[:k]
-        for idx in indices:
-            if idx != 0:  
-                variance_false.append(variance[idx].item())
-                y_true.append(0)  
-                y_probab.append(probs[idx].item())
 
         # ========== Head Prediction ==========
         true_heads = head_filter.get((dst, rel), set())
@@ -142,26 +134,18 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
 
         # Use optimized inference
         probs, variance = models.inference_optimised(encoded_zs, eval_edge_index, eval_edge_type)
-        
+        if calibration_model is not None:
+            if isinstance(calibration_model, IsotonicCalibrator):
+                probs = torch.sigmoid(probs)
+                probs = calibration_model.predict(probs.detach().cpu().numpy())
+                probs = torch.from_numpy(probs).float()
+                print("Applied Isotonic Regression ")
+
+            else:
+                probs = torch.sigmoid(calibration_model(probs))
+
         ranks.append(compute_rank(probs))
-        y_true.append(1)  
-        y_probab.append(probs[0].item())
-        variance_true.append(variance[0].item())
-        k = 10
-        indices = torch.randperm(len(probs))[:k]
-        for idx in indices:
-            if idx != 0:  
-                variance_false.append(variance[idx].item())
-                y_true.append(0)  
-                y_probab.append(probs[idx].item())
 
-    y_probs_tensor = torch.tensor(y_probab)
-    y_true_tensor = torch.tensor(y_true)
-    variance_true_tensor = torch.tensor(variance_true)
-    variance_false_tensor = torch.tensor(variance_false)
-
-    # Call your provided function
-    uncertainty_results = compute_uncertainty(y_true_tensor, y_probs_tensor)        
 
     # Calculate final metrics
     ranks_t = torch.tensor(ranks, dtype=torch.float)
@@ -171,19 +155,13 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
         'hits@1': (ranks_t <= 1).float().mean().item(),
         'hits@3': (ranks_t <= 3).float().mean().item(),
         'hits@10': (ranks_t <= 10).float().mean().item(),
-        'variance_true_mean': variance_true_tensor.mean().item(),
-        'variance_false_mean': variance_false_tensor.mean().item(),
-        'brier_score': uncertainty_results['brier_score'],
-        'ece': uncertainty_results['ece'],
-        'ace': uncertainty_results['ace'],
-        'prob_true': uncertainty_results['prob_true'],
-        'prob_pred': uncertainty_results['prob_pred'],        
+
     }
 
     return scores
 
 @torch.no_grad()
-def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_type, data, model, mc_samples, return_probs= False):
+def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_type, data, model, mc_samples,calibration_model=None):
 
     # OPTIMIZATION: Encode graph once per model and cache
     all_z = []
@@ -194,10 +172,7 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
     model.encoder.mc_dropout = False
 
     ranks = []
-    y_probab = []
-    y_true = [] 
     variance_true = []
-    variance_false = []
     for i in tqdm(range(edge_type.numel()), desc="Computing MRR"):
         (src, dst), rel = edge_index[:, i], edge_type[i]
 
@@ -220,24 +195,26 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         predictions = []
         for model_idx in range(mc_samples):
             pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
-            pred = torch.sigmoid(pred)
             predictions.append(pred)
         
-        probs = torch.stack(predictions).mean(dim=0)
-        variance = torch.stack(predictions).var(dim=0)
+        if calibration_model is not None:
+            stacked = torch.stack(predictions, dim=1)   # Shape: [num_candidates, MC_SAMPLES]
+            if isinstance(calibration_model, IsotonicCalibrator):
+                probs = calibration_model.predict(torch.sigmoid(stacked).mean(dim=1).detach().cpu().numpy())
+                probs = torch.from_numpy(probs).float()
+            else:
+                probs = calibration_model(stacked)
+
+        else:
+            stacked = torch.stack(predictions, dim=0)  
+            probs = torch.sigmoid(stacked).mean(dim=0)  
+
+
+        ranks.append(compute_rank(probs))
+        
+        variance = torch.stack(predictions, dim=0).var(dim=0)  # [MC_SAMPLES, N] → var per candidate
         variance_true.append(variance[0].item())
 
-        rank = compute_rank(probs)
-        ranks.append(rank)
-        y_true.append(1)  
-        y_probab.append(probs[0].item())  
-        k = 2
-        indices = torch.randperm(len(probs))[:k]
-        for idx in indices:
-            if idx != 0:  
-                variance_false.append(variance[idx].item())
-                y_true.append(0)  
-                y_probab.append(probs[idx].item())
         # Try all nodes as heads, but delete true triplets:
         head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
         for (heads, tails), types in [
@@ -257,41 +234,22 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         predictions = []
         for model_idx in range(mc_samples):
             pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
-            pred = torch.sigmoid(pred)
             predictions.append(pred)
-        
-        probs = torch.stack(predictions).mean(dim=0)
-        variance = torch.stack(predictions).var(dim=0)
-        variance_true.append(variance[0].item())
-        rank = compute_rank(probs)
-        ranks.append(rank)
-        y_true.append(1)  
-        y_probab.append(probs[0].item())  
-        k = 2
-        indices = torch.randperm(len(probs))[:k]
-        for idx in indices:
-            if idx != 0:  
-                variance_false.append(variance[idx].item())
-                y_true.append(0)  
-                y_probab.append(probs[idx].item())
 
+        if calibration_model is not None:
+            stacked = torch.stack(predictions, dim=1)   # Shape: [num_candidates, MC_SAMPLES]
+            if isinstance(calibration_model, IsotonicCalibrator):
+                probs = calibration_model.predict(torch.sigmoid(stacked).mean(dim=1).detach().cpu().numpy())
+                probs = torch.from_numpy(probs).float()
+            else:
+                probs = calibration_model(stacked)
+        else:
+            stacked = torch.stack(predictions, dim=0)   
+            probs = torch.sigmoid(stacked).mean(dim=0)  
 
-    if return_probs:
-        return torch.tensor(y_probab), torch.tensor(y_true)
+        variance = torch.stack(predictions, dim=0).var(dim=0)
+        ranks.append(compute_rank(probs))   
 
-    if (hasattr(model.decoder, 'use_calibration') and 
-        getattr(model.decoder, 'use_calibration', False) and 
-        hasattr(model.decoder, 'isotonic_regression_transform') and 
-        getattr(model.decoder, 'isotonic_regression_transform', None) is not None):
-        # Apply isotonic regression calibration
-        y_probs_np = np.array(y_probab)
-        calibrated_probs = model.decoder.isotonic_regression_transform.transform(y_probs_np)
-        print("After Calibration:")
-        print_stats(calibrated_probs)
-        y_probs_tensor = torch.tensor(calibrated_probs)
-        
-    # Call your provided function
-    uncertainty_results = compute_uncertainty(y_true, y_probab)
 
     scores = {
         'mrr': (1. / torch.tensor(ranks, dtype=torch.float)).mean(),
@@ -299,15 +257,6 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         'hits@1': (torch.tensor(ranks, dtype=torch.float) <= 1).float().mean(),
         'hits@3': (torch.tensor(ranks, dtype=torch.float) <= 3).float().mean(),
         'hits@10': (torch.tensor(ranks, dtype=torch.float) <= 10).float().mean(),
-        'variance_true_mean': np.mean(variance_true),
-        'variance_false_mean': np.mean(variance_false),
-        # Add Uncertainty Metrics
-        'brier_score': uncertainty_results['brier_score'],
-        'ece': uncertainty_results['ece'],
-        'ace': uncertainty_results['ace'],
-        'prob_true': uncertainty_results['prob_true'],
-        'prob_pred': uncertainty_results['prob_pred'],
-
     }
 
     return scores
@@ -323,8 +272,16 @@ def compute_uncertainty(y_true, y_probs):
     Returns:
     dict: Contains scalar scores and the matplotlib figure.
     """
-    y_true_tensor = torch.tensor(y_true)
-    y_probs_tensor = torch.tensor(y_probs)
+    # Convert to tensors properly, handling both tensor and numpy inputs
+    if isinstance(y_true, torch.Tensor):
+        y_true_tensor = y_true.detach().cpu()
+    else:
+        y_true_tensor = torch.tensor(y_true).cpu()
+    
+    if isinstance(y_probs, torch.Tensor):
+        y_probs_tensor = y_probs.detach().cpu()
+    else:
+        y_probs_tensor = torch.tensor(y_probs).cpu()
 
     ece_metric = BinaryCalibrationError(n_bins=10, norm='l1')
     
@@ -348,16 +305,13 @@ def compute_uncertainty(y_true, y_probs):
 
 
 @torch.no_grad()
-def compute_mrr(edge_index, edge_type, data, model, return_probs= False):
+def compute_mrr(edge_index, edge_type, data, model, return_probs= False, negatives = 1, calibration_model=None):
     model.eval()
     z = model.encode(data.edge_index, data.edge_type)
     ranks = []
     
     # For calibration
     ranks = []
-    y_probab = []
-    y_true = []
-
     for i in tqdm(range(edge_type.numel())):
         (src, dst), rel = edge_index[:, i], edge_type[i]
 
@@ -377,19 +331,16 @@ def compute_mrr(edge_index, edge_type, data, model, return_probs= False):
         eval_edge_type = torch.full_like(tail, fill_value=rel)
 
         out = model.decode(z, eval_edge_index, eval_edge_type)
-        
-        probs = torch.sigmoid(out)
-        # probs = F.softmax(out, dim=0)
-        
+        if calibration_model is not None:
+            if isinstance(calibration_model, IsotonicCalibrator):
+                probs = calibration_model.predict(torch.sigmoid(out).detach().cpu().numpy())
+                probs = torch.from_numpy(probs).float()
+            else:
+                probs = torch.sigmoid(calibration_model(out))
+        else:
+            probs = torch.sigmoid(out)
         ranks.append(compute_rank(probs))
-        y_true.append(1)  
-        y_probab.append(probs[0].item())  
-        k = 2
-        indices = torch.randperm(len(probs))[:k]
-        for idx in indices:
-            if idx != 0:  
-                y_true.append(0)  
-                y_probab.append(probs[idx].item())
+
 
         # --- HEAD PREDICTION ---
         head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
@@ -408,23 +359,18 @@ def compute_mrr(edge_index, edge_type, data, model, return_probs= False):
 
         out = model.decode(z, eval_edge_index, eval_edge_type)
         
-        probs = torch.sigmoid(out)
+        if calibration_model is not None:
+            if isinstance(calibration_model, IsotonicCalibrator):
+                probs = calibration_model.predict(torch.sigmoid(out).detach().cpu().numpy())
+                probs = torch.from_numpy(probs).float()
+
+            else:
+                probs = torch.sigmoid(calibration_model(out))
+        else:
+            probs = torch.sigmoid(out)
         ranks.append(compute_rank(probs))
-        y_true.append(1)  
-        y_probab.append(probs[0].item())  
 
-        k = 2
-        indices = torch.randperm(len(probs))[:k]
-        for idx in indices:
-            if idx != 0:  
-                y_true.append(0)  
-                y_probab.append(probs[idx].item())
 
-    print("Before Calibration:")
-    print_stats(np.array(y_probab))
-    uncertainty_results = compute_uncertainty(y_true, y_probab)
-    if return_probs: 
-        return y_probab, y_true
 
     ranks_tensor = torch.tensor(ranks, dtype=torch.float)
     
@@ -434,12 +380,6 @@ def compute_mrr(edge_index, edge_type, data, model, return_probs= False):
         'hits@1': (ranks_tensor <= 1).float().mean().item(),
         'hits@3': (ranks_tensor <= 3).float().mean().item(),
         'hits@10': (ranks_tensor <= 10).float().mean().item(),
-
-        'brier_score': uncertainty_results['brier_score'],
-        'ece': uncertainty_results['ece'],
-        'ace': uncertainty_results['ace'],
-        'prob_true': uncertainty_results['prob_true'],
-        'prob_pred': uncertainty_results['prob_pred'],
     }
 
     return scores
@@ -464,3 +404,5 @@ def print_stats(probab,addtional=""):
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Histogram saved as '{filename}'")
+
+

@@ -67,7 +67,8 @@ class BasePipeline:
                                 self.data, model, mc_samples=mc_samples, calibration_model=calibration_model)
         elif type == 'ensemble':
             scores = compute_mrr_ensemble(self.data.edge_index, self.data.edge_type,
-                                valid_edge_index, valid_edge_type, self.data, model)
+                                valid_edge_index, valid_edge_type, self.data, model,
+                                calibration_model=calibration_model)
         else:
             raise ValueError(f"Unsupported evaluation type: {type}")
         

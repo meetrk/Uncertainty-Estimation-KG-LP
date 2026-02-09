@@ -56,35 +56,6 @@ class DeepEnsemble(nn.Module):
             decoder = base_decoder_class(**decoder_args_with_calibration)
             model = GAE(encoder=encoder, decoder=decoder)
             self.models.append(model)
-        
-        self.to(device)
-
-        if self.calibration == "scalar":
-            self.temperature = Parameter(torch.ones(1), requires_grad=False)
-            self.temperature.to(device)
-
-        elif self.calibration == "input_dependent":
-            self.temp_network = torch.nn.Sequential(
-                torch.nn.Linear(2 * encoder_args['model_config']['encoder']['embedding_dim'], encoder_args['model_config']['encoder']['embedding_dim'] // 2),
-                torch.nn.ReLU(),
-                torch.nn.Linear(encoder_args['model_config']['encoder']['embedding_dim'] // 2, 1),
-                torch.nn.Softplus()  
-            )
-            self.temp_network.to(device)
-            # Initialize to output ~1.0 (no scaling) initially
-            for param in self.temp_network.parameters():
-                param.data.normal_(0, 0.01)
-        elif self.calibration == "isotonic_regression":
-            self.isotonic_regression_transform = None  # To be set during calibration
-            self.use_calibration = False
-        elif self.calibration == "none":
-            self.temperature = Parameter(torch.ones(1), requires_grad=False)
-            self.temperature.to(device)
-        else:
-            raise ValueError("Unsupported calibration method specified")
-        
-        self.use_calibration = False
-
     
     def get_model(self, idx: int):
         """Get a specific model from the ensemble."""
@@ -99,11 +70,12 @@ class DeepEnsemble(nn.Module):
             edge_type: Edge types
             model_idx: If specified, use only this model. Otherwise use all.
         """
+        device = edge_index.device
         if model_idx is not None:
-            return self.models[model_idx].encode(edge_index, edge_type)
+            return self.models[model_idx].to(device).encode(edge_index, edge_type)
         else:
             # Return list of encodings from all models
-            return [model.encode(edge_index, edge_type) for model in self.models]
+            return [model.to(device).encode(edge_index, edge_type) for model in self.models]
     
     def decode(self, z, edge_index, edge_type, model_idx: int = None):
         """
@@ -193,83 +165,14 @@ class DeepEnsemble(nn.Module):
             Calibrated prediction scores (Logits if scalar/input-dependent, Probabilities if isotonic/none)
         """
 
-        outs = []
-
-        for k, model in enumerate(self.models):
-            logits = model.decode(encoded_zs[k], eval_edge_index, eval_edge_type)
-            probs = torch.sigmoid(logits)
-            outs.append(probs)
+        logits = self.decode(encoded_zs, eval_edge_index, eval_edge_type)
+        outs = torch.stack(logits, dim=0)
             
-        # Aggregation
-        mean_pred = torch.stack(outs, dim=0).mean(dim=0)
-        var_pred = torch.stack(outs, dim=0).var(dim=0)
-        # Calibration Logic
-        if self.use_calibration:
-
-            # Prepare for calibration (convert prob -> logit)
-
-            if self.calibration == "scalar":
-                score = mean_pred / self.temperature.to(self.device)
-                
-            elif self.calibration == "isotonic_regression":
-                # Apply isotonic regression to PROBABILITIES
-                device = mean_pred.device
-                preds_np = mean_pred.cpu().numpy().flatten()
-                calibrated_preds_np = self.isotonic_regression_transform.predict(preds_np)
-                score = torch.tensor(calibrated_preds_np, dtype=torch.float32, device=device).reshape(mean_pred.shape)
-            else:
-                score = mean_pred # Return probabilities if no calib match
-        else:
-            score = mean_pred # Return probabilities if calib disabled
+        mean_pred = outs.mean(dim=0)
+        var_pred = outs.var(dim=0)
             
-        return score,var_pred
+        return mean_pred,var_pred
 
-    def predict_with_uncertainty(
-        self, 
-        edge_index, 
-        edge_type, 
-        pred_edge_index, 
-        pred_edge_type,
-        return_logits: bool = False,
-        enable_grad: bool = False  
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        
-        self.eval()
-        # Enable grad only if explicitly requested (e.g., during calibration training)
-        context = torch.enable_grad() if enable_grad else torch.no_grad()
-        
-        with context:
-            # 1. Get Raw Ensemble Predictions
-            predictions = self.forward_ensemble(
-                edge_index, edge_type, pred_edge_index, pred_edge_type
-            )
-            
-            preds_stack = torch.stack(predictions, dim=0)
-            mean_prob = preds_stack.mean(dim=0)
-            std_pred = preds_stack.std(dim=0)
-            
-            # 2. Convert to Ensemble Logits
-            eps = 1e-6
-            mean_prob_clamped = torch.clamp(mean_prob, min=eps, max=1-eps)
-            ensemble_logit = torch.logit(mean_prob_clamped)
-
-            # 3. Apply Calibration (Scalar or Input-Dependent)
-            if self.use_calibration:
-                if self.calibration == "scalar":
-                    calibrated_logit = ensemble_logit / self.temperature.to(ensemble_logit.device)
-                    
-                elif self.calibration == "input_dependent":
-                    temps = self.compute_input_dependent_temperature(pred_edge_index, pred_edge_type)
-                    calibrated_logit = ensemble_logit / temps.view(-1)
-                else:
-                    calibrated_logit = ensemble_logit
-            else:
-                calibrated_logit = ensemble_logit
-
-            if return_logits:
-                return calibrated_logit, std_pred
-            else:
-                return torch.sigmoid(calibrated_logit), std_pred
             
     def __str__(self) -> str:
         str = ""

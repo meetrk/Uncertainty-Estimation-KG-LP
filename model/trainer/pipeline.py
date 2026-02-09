@@ -242,29 +242,6 @@ class Pipeline(BasePipeline):
         else:
             raise ValueError(f"Unsupported calibration method: {method}")
     
-    def _get_temperature_stats(self, model, edge_index, edge_type, num_samples=None):
-        """Compute temperature statistics for validation samples.
-        
-        Returns:
-            dict: Temperature statistics (mean, std, min, max)
-        """
-        with torch.no_grad():
-            z = model.encode(self.data.edge_index, self.data.edge_type)
-            
-            if num_samples is not None:
-                edge_index = edge_index[:, :num_samples]
-                edge_type = edge_type[:num_samples]
-            
-            heads = z[edge_index[0]]
-            rels = model.decoder.rel_emb[edge_type]
-            temps = model.decoder.compute_temperature(heads, rels)
-            
-            return {
-                'mean': temps.mean().item(),
-                'std': temps.std().item(),
-                'min': temps.min().item(),
-                'max': temps.max().item()
-            }
 
     def calibrate_platt_scaling_temperature(self, model, max_iters=50, lr=0.01, type_params= None):
         """Calibrate input-dependent temperature network on validation set.
@@ -292,7 +269,7 @@ class Pipeline(BasePipeline):
         inference_params = {**type_params, 'return_logits': True}
         pos,neg = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, inference_params)
         if type_params['type'] == 'mc_dropout':
-            pos = torch.stack(pos, dim=1)  
+            pos = torch.stack(pos, dim=1) 
             neg = torch.stack(neg, dim=1)
         platt_model.set_parameters(
             pos_logits=pos,
@@ -353,12 +330,14 @@ class Pipeline(BasePipeline):
         self.logger.info("Starting Isotonic Regression Calibration")
 
         with torch.no_grad():
+            type_params = {**type_params, 'num_negatives': 10}
             out, labels = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, type_params)     
-           
+        
         probab = torch.sigmoid(out)
         probab = probab.cpu().numpy()
         labels = labels.cpu().numpy()
-        
+        if type_params['type'] == 'mc_dropout':
+            probab = probab.mean(axis=1)
         iso_reg = IsotonicCalibrator(out_of_bounds='clip')
         iso_reg.fit(probab, labels)
         self.logger.info("Isotonic Regression model fitted.")
@@ -366,8 +345,7 @@ class Pipeline(BasePipeline):
 
         return iso_reg
 
-
-
+    @torch.no_grad()
     def inference(self, model,eval_edge_index, eval_edge_type, params):
         model.eval()
         if params['type'] == 'mc_dropout':
@@ -375,22 +353,22 @@ class Pipeline(BasePipeline):
             gt = []
             positives = []
             negatives =[]
+            neg_edge_index,neg_edge_type = negative_sampling(eval_edge_index, eval_edge_type, self.data.num_nodes, params.get('num_negatives', 1))
             for _ in range(params['mc_samples']):
                 model.encoder.mc_dropout = True
                 z = model.encode(self.data.edge_index, self.data.edge_type)
                 pos_out = model.decode(z, eval_edge_index, eval_edge_type)
-                neg_edge_index,neg_edge_type = negative_sampling(eval_edge_index, eval_edge_type, self.data.num_nodes, 1)
                 neg_out = model.decode(z, neg_edge_index, neg_edge_type)
                 positives.append(pos_out)
                 negatives.append(neg_out)
             if params.get('return_logits', False): 
                 return positives, negatives
-            out = torch.cat([torch.stack(positives, dim=1), torch.stack(negatives, dim=1)], dim=0)
+            out = torch.cat([torch.stack(positives, dim=1), torch.stack(negatives, dim=1)], dim=0) # Shape: (num_samples, mc_samples)
             gt = torch.cat([torch.full_like(pos_out, 1), torch.full_like(neg_out, 0)])
         else:
             z = model.encode(self.data.edge_index, self.data.edge_type)
             pos_out = model.decode(z, eval_edge_index, eval_edge_type)
-            neg_edge_index,neg_edge_type = negative_sampling(eval_edge_index, eval_edge_type, self.data.num_nodes, 1)
+            neg_edge_index,neg_edge_type = negative_sampling(eval_edge_index, eval_edge_type, self.data.num_nodes, params.get('num_negatives', 1))
             neg_out = model.decode(z, neg_edge_index, neg_edge_type)  
             if params.get('return_logits', False):
                     return pos_out, neg_out
@@ -400,20 +378,23 @@ class Pipeline(BasePipeline):
     
     def test_uncertainty(self, model,test_edge_index, test_edge_type, params):
 
+        params = {**params, 'num_negatives': 1}
         y_out, y_true = self.inference(model,test_edge_index, test_edge_type, params)
         y_true = y_true.detach().cpu().numpy()
 
         if 'calibration_model' in params and isinstance(params['calibration_model'], IsotonicCalibrator):
-            y_out = torch.sigmoid(y_out.detach()).cpu().numpy()
             calibrator = params['calibration_model']
-            y_prob_calib = calibrator.predict(y_out)
+            y_out = torch.sigmoid(y_out.detach()).cpu().numpy()
+            if params['type'] == 'mc_dropout':
+                y_prob_calib = calibrator.predict(y_out.mean(axis=1))
+            else:
+                y_prob_calib = calibrator.predict(y_out)
             self.logger.info("Uncertainty scores after calibration:")
             uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
         elif 'calibration_model' in params and isinstance(params['calibration_model'], TemperatureScaling):
             calibrator = params['calibration_model'].eval()
             y_out_calib = calibrator(y_out.detach()).detach().cpu().numpy()
             y_prob_calib = torch.sigmoid(torch.tensor(y_out_calib)).numpy()
-            self.logger.info("Applied Temperature Scaling calibration")
             uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
         elif 'calibration_model' in params and isinstance(params['calibration_model'], PlattScaling):
             calibrator = params['calibration_model'].eval()
@@ -435,7 +416,8 @@ class Pipeline(BasePipeline):
                 y_prob = torch.sigmoid(y_out.detach()).cpu().numpy()
                 uncertainty_scores = compute_uncertainty(y_true, y_prob)
             else:
-                y_prob = torch.sigmoid(y_out.mean(dim=1).detach()).cpu().numpy()
+                y_prob = torch.sigmoid(y_out.detach()).cpu().numpy()
+                y_prob = y_prob.mean(axis=1)
                 uncertainty_scores = compute_uncertainty(y_true, y_prob)
 
 
