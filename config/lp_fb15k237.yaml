@@ -9,6 +9,7 @@ model:
     embedding_dim: 500
     dropout: 0.2
     num_bases : 5
+    bases_enabled: false
 
   decoder:
     type: DistMult
@@ -23,7 +24,7 @@ ensemble:
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 1
+    negative_sampling_ratio: 3
     edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
@@ -34,15 +35,15 @@ training:
     patience: 5
     delta: 0.001
   load_model: true
-  save_model: true
-  checkpoint_path: ./saved_models/experiment_1/FB15k-237_checkpoint_label_1_negative_sampling_1_edge_dropout_0.2_epoch_1500.pth
+  save_model: false
+  checkpoint_path: ./new_models/experiment_1/FB15k-237_checkpoint_label_1_negative_sampling_3_edge_dropout_0.2_epoch_1000.pth
   label_smoothing: 
-    positive: 1
-    negative: 0
+    positive: 0.9
+    negative: 0.05
 calibration:
   enabled: true
-  type: standard
+  type: mc_dropout
   mc_samples: 5
-  method: scalar
-  max_iters: 100
+  method: platt_scaling
+  max_iters: 1000
   learning_rate: 0.01

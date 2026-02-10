@@ -9,6 +9,7 @@ model:
     embedding_dim: 500
     dropout: 0.2
     num_bases : 5
+    bases_enabled: false
 
   decoder:
     type: DistMult
@@ -23,8 +24,8 @@ ensemble:
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 1
-    edge_dropout: 0
+    negative_sampling_ratio: 3
+    edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
     weight_decay: 0
@@ -35,15 +36,15 @@ training:
     delta: 0.001
   load_model: true
   save_model: true
-  checkpoint_path: ./saved_models/experiment_2/FB15k-237_ensemble_checkpoint_scalar_epoch_1000.pth
+  checkpoint_path: ./new_models/experiment_2/FB15k-237_ensemble_checkpoint_scalar_epoch_1000.pth
   test: true
   label_smoothing: 
-    positive: 0.90
-    negative: 0.10
+    positive: 1
+    negative: 0
 calibration:
   enabled: true
   type: ensemble
   mc_samples: 5
-  method: scalar
-  max_iters: 100
+  method: isotonic_regression
+  max_iters: 1000
   learning_rate: 0.01

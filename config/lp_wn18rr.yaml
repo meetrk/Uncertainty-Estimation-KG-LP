@@ -1,0 +1,49 @@
+dataset:
+  name: WN18RR
+  path: ./dataset/wn18rr
+
+model:
+  encoder:
+    type: RGCN
+    hidden_layer_size: 500
+    embedding_dim: 500
+    dropout: 0.2
+    num_bases : 5
+    bases_enabled: true
+  decoder:
+    type: DistMult
+    l2_penalty : 0.001
+    w_gain: false
+    b_init: false
+
+ensemble:
+  enabled: false
+  num_models: 5 
+
+training:
+  epochs: 10000
+  sampling:
+    negative_sampling_ratio: 3
+    edge_dropout: 0.2
+  optimiser:
+    learning_rate: 0.01
+    weight_decay: 0
+  evaluation_frequency: 100
+  early stopping:
+    enabled: true
+    patience: 10
+    delta: 0.001
+  load_model: true
+  save_model: true
+  checkpoint_path: ./new_models/experiment_1/WN18RR_checkpoint_label_0.9_negative_sampling_3_edge_dropout_0.2_epoch_1700.pth
+  test: true
+  label_smoothing: 
+    positive: 0.9
+    negative: 0.05
+calibration:
+  enabled: true
+  type: mc_dropout
+  mc_samples: 5
+  method: isotonic_regression
+  max_iters: 1000
+  learning_rate: 0.01

@@ -9,7 +9,7 @@ model:
     embedding_dim: 500
     dropout: 0.2
     num_bases : 5
-
+    bases_enabled: false
   decoder:
     type: DistMult
     l2_penalty : 0.001
@@ -23,7 +23,7 @@ ensemble:
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 1
+    negative_sampling_ratio: 3
     edge_dropout: 0.2
   optimiser:
     learning_rate: 0.01
@@ -33,17 +33,17 @@ training:
     enabled: true
     patience: 10
     delta: 0.001
-  load_model: false
+  load_model: true
   save_model: true
-  checkpoint_path: ./saved_models/experiment_2/WN18RR_ensemble_checkpoint_neg_1.pth
+  checkpoint_path: ./new_models/experiment_2/WN18RR_ensemble_checkpoint_scalar_epoch_4200.pth
   test: true
   label_smoothing: 
-    positive: 1
-    negative: 0
+    positive: 0.9
+    negative: 0.05
 calibration:
   enabled: true
   type: ensemble
   mc_samples: 5
-  method: scalar
-  max_iters: 100
+  method: isotonic_regression
+  max_iters: 1000
   learning_rate: 0.01
