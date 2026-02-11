@@ -1,6 +1,6 @@
 # Uncertainty Estimation for Knowledge Graph Link Prediction
 
-A PyTorch-based implementation for link prediction on knowledge graphs with uncertainty estimation methods. This project is part of thesis work aimed at developing robust uncertainty quantification techniques for knowledge graph completion tasks.
+A PyTorch-based implementation for link prediction on knowledge graphs with uncertainty estimation and calibration methods. This project implements robust uncertainty quantification techniques for knowledge graph completion tasks, including Monte Carlo Dropout, Deep Ensembles, and post-hoc calibration.
 
 ## Overview
 
@@ -8,16 +8,34 @@ Link prediction in knowledge graphs is a fundamental task that predicts missing 
 
 - **Encoder**: Relational Graph Convolutional Network (RGCN) for learning entity representations
 - **Decoders**: DistMult and TransE for scoring candidate triples
-- **Uncertainty Methods** (planned): Monte Carlo Dropout and Deep Ensemble techniques
+- **Uncertainty Methods**: 
+  - **Monte Carlo Dropout**: Epistemic uncertainty via stochastic forward passes
+  - **Deep Ensembles**: Uncertainty quantification through model diversity
+- **Calibration Methods**: Temperature Scaling, Isotonic Regression, and Platt Scaling
 
 ## Features
 
 - PyTorch and PyTorch Geometric based implementation
 - Support for standard benchmark datasets (WN18RR, FB15k-237)
 - Modular architecture with configurable encoders and decoders
-- TensorBoard integration for training visualization
-- Automatic checkpoint saving during training
-- Comprehensive evaluation metrics (Link Prediction + AUC/Loss)
+- **Uncertainty Estimation Methods**:
+  - Monte Carlo Dropout with configurable sampling
+  - Deep Ensemble with multiple independent models
+- **Calibration Methods**:
+  - Temperature Scaling (scalar and MC-Dropout variants)
+  - Isotonic Regression
+  - Platt Scaling (input-dependent neural network)
+- **Comprehensive Evaluation Metrics**:
+  - Link Prediction: MRR, Mean Rank, Hits@1/3/10
+  - Calibration: ECE, ACE, Brier Score
+  - Uncertainty: Predictive variance, reliability diagrams
+- **Training Features**:
+  - Early stopping with patience
+  - Edge dropout regularization
+  - Label smoothing
+  - Gradient clipping
+  - TensorBoard integration
+  - Automatic checkpoint saving
 - YAML-based configuration system
 
 ## Project Structure
@@ -27,26 +45,36 @@ Link prediction in knowledge graphs is a fundamental task that predicts missing 
 ├── requirements.txt             # Python dependencies
 ├── config/                      # Configuration files
 │   ├── lp_fb15k237.yaml        # FB15k-237 dataset config
-│   └── lp_wn18rr.yaml          # WN18RR dataset config
-├── dataset/                     # Dataset files
-│   ├── fb15k237/               # FB15k-237 dataset
-│   └── wn18rr/                 # WN18RR dataset
+│   ├── lp_wn18rr.yaml          # WN18RR dataset config
+│   ├── lp_fb15k237_ensemble.yaml  # FB15k-237 ensemble config
+│   └── lp_wn18rr_ensemble.yaml    # WN18RR ensemble config
+├── data/                        # Dataset storage (auto-downloaded)
+│   └── RLPD/                   # RelLinkPredDataset cache
 ├── model/                       # Model implementations
-│   ├── encoder/                # Graph encoders (RGCN)
+│   ├── encoder/                # Graph encoders
 │   │   ├── model.py           # RGCN encoder implementation
 │   │   └── layer.py           # RGCN layer implementation
 │   ├── decoder/                # Link prediction decoders
 │   │   ├── distmult.py        # DistMult decoder
 │   │   ├── transe.py          # TransE decoder
 │   │   └── kgemodel.py        # Base KGE model
+│   ├── ensemble/               # Uncertainty estimation
+│   │   └── deep_ensemble.py   # Deep Ensemble implementation
+│   ├── calibrator/             # Calibration methods
+│   │   ├── tempscaling.py     # Temperature Scaling
+│   │   ├── isotonic.py        # Isotonic Regression
+│   │   └── plattscaling.py    # Platt Scaling
 │   └── trainer/                # Training pipeline
-│       └── pipeline.py         # Training and evaluation pipeline
+│       ├── pipeline.py         # Single model training
+│       ├── ensemble_pipeline.py # Ensemble training
+│       └── basepipeline.py     # Base pipeline class
 ├── utils/                       # Utility functions
 │   ├── config_loader.py        # Configuration loading
-│   ├── dataset_loader.py       # Dataset loading and processing
-│   ├── evaluation.py           # Evaluation metrics
+│   ├── evaluation.py           # Evaluation metrics & uncertainty
 │   ├── initialiser.py          # Weight initialization
 │   └── utils.py                # General utilities
+├── misc/                        # Miscellaneous utilities
+│   └── rel_link_pred_dataset.py # Dataset wrapper
 ├── checkpoints/                 # Saved model checkpoints
 └── runs/                        # TensorBoard logs
 ```
@@ -78,18 +106,42 @@ pip install -r requirements.txt
 Run training with a configuration file:
 
 ```bash
-# Train on WN18RR dataset
+# Train single model on WN18RR dataset
 python main.py --config config/lp_wn18rr.yaml
 
-# Train on FB15k-237 dataset
+# Train single model on FB15k-237 dataset
 python main.py --config config/lp_fb15k237.yaml
+
+# Train Deep Ensemble on WN18RR
+python main.py --config config/lp_wn18rr_ensemble.yaml
+
+# Train Deep Ensemble on FB15k-237
+python main.py --config config/lp_fb15k237_ensemble.yaml
 ```
+
+### Uncertainty Evaluation
+
+To evaluate uncertainty on a trained model, set `load_model: true` in the config and specify the checkpoint path:
+
+```yaml
+training:
+  load_model: true
+  checkpoint_path: ./checkpoints/model_epoch_1000.pth
+  test: true
+```
+
+Then run:
+```bash
+python main.py --config config/lp_wn18rr.yaml
+```
+
+This will load the model, apply calibration (if enabled), and compute uncertainty metrics on the test set.
 
 ### Configuration
 
-Configuration files are in YAML format and control all aspects of training:
+Configuration files are in YAML format and control all aspects of training, uncertainty estimation, and calibration.
 
-**Example configuration (`config/lp_wn18rr.yaml`):**
+**Example configuration for single model (`config/lp_wn18rr.yaml`):**
 ```yaml
 dataset:
   name: WN18RR
@@ -98,26 +150,59 @@ dataset:
 model:
   encoder:
     type: RGCN
-    hidden_layer_size: 200
-    embedding_dim: 200
-    num_layers: 2
+    hidden_layer_size: 500
+    embedding_dim: 500
     dropout: 0.2
-    num_bases: 4
-    w_init: schlichtkrull-normal
+    num_bases: 5
+    bases_enabled: true
     
   decoder:
     type: DistMult  # or TransE
-    l2_penalty_type: schlichtkrull-l2
-    l2_penalty: 0
+    l2_penalty: 0.001
+    w_gain: false
+    b_init: false
+
+ensemble:
+  enabled: false  # Set to true for Deep Ensemble
+  num_models: 5   # Number of ensemble members
   
 training:
-  epochs: 10
+  epochs: 10000
   sampling:
-    batch_size: 16384
-    method: edge-neighborhood
-    negative_sampling_ratio: 1
-    head_corrupt_prob: 0.5
+    negative_sampling_ratio: 3
+    edge_dropout: 0.2
+  optimiser:
+    learning_rate: 0.01
+    weight_decay: 0
+  evaluation_frequency: 100
+  early_stopping:
+    enabled: true
+    patience: 10
+    delta: 0.001
+  load_model: false  # Set to true to load checkpoint
+  save_model: true
+  checkpoint_path: ./checkpoints/model.pth
+  test: true
+  label_smoothing:
+    positive: 0.9  # Smooth positive labels
+    negative: 0.05 # Smooth negative labels
+
+calibration:
+  enabled: true
+  type: mc_dropout  # or 'ensemble' for Deep Ensemble
+  mc_samples: 5     # Number of MC forward passes
+  method: isotonic_regression  # or 'temperature_scaling', 'platt_scaling'
+  max_iters: 1000
+  learning_rate: 0.01
 ```
+
+**Key Configuration Options:**
+
+- **Ensemble**: Enable Deep Ensemble by setting `ensemble.enabled: true`
+- **MC Dropout**: Use with single model by setting `calibration.type: mc_dropout`
+- **Calibration Method**: Choose from `temperature_scaling`, `isotonic_regression`, or `platt_scaling`
+- **Edge Dropout**: Regularization during training via `training.sampling.edge_dropout`
+- **Label Smoothing**: Prevents overconfident predictions
 
 ### Logging Options
 
@@ -139,24 +224,46 @@ Open http://localhost:6006 in your browser to view training curves, losses, and 
 
 ## Pipeline
 
-The training pipeline consists of the following stages:
+The training pipeline supports both single model and ensemble training:
+
+### Single Model Training Pipeline
 
 1. **Data Loading**: Load knowledge graph datasets (WN18RR or FB15k-237)
 2. **Model Initialization**: 
    - RGCN encoder for learning entity embeddings
    - DistMult/TransE decoder for scoring triples
 3. **Training Loop**:
-   - Batch sampling with negative sampling
+   - Negative sampling with configurable ratio
+   - Edge dropout for regularization
+   - Label smoothing for calibration
    - Forward pass through encoder and decoder
-   - Loss computation and backpropagation
+   - Loss computation and backpropagation with gradient clipping
+   - Early stopping with patience mechanism
    - Checkpoint saving at specified intervals
 4. **Evaluation**:
-   - **Link Prediction Metrics**: MRR, Hits@1, Hits@3, Hits@10
-   - **Classification Metrics**: Evaluation loss and AUC score
-5. **Logging**: 
+   - **Link Prediction Metrics**: MRR, Mean Rank, Hits@1/3/10
+   - **Calibration Metrics**: ECE, ACE, Brier Score
+5. **Uncertainty Estimation** (optional):
+   - Monte Carlo Dropout: Multiple stochastic forward passes
+   - Predictive variance computation
+6. **Calibration** (optional):
+   - Post-hoc calibration using validation set
+   - Temperature Scaling, Isotonic Regression, or Platt Scaling
+7. **Logging**: 
    - Console logging with configurable verbosity
    - TensorBoard visualization
    - Training history saved to file
+
+### Deep Ensemble Training Pipeline
+
+1. **Ensemble Initialization**: Create N independent models with different random seeds
+2. **Parallel Training**: Train each model independently
+3. **Diversity Tracking**: Monitor prediction variance across ensemble members
+4. **Aggregation**: 
+   - Mean prediction across ensemble
+   - Uncertainty via variance of predictions
+5. **Ensemble Evaluation**: Compute metrics using aggregated predictions
+6. **Calibration** (optional): Calibrate ensemble predictions
 
 ## Datasets
 
@@ -181,56 +288,110 @@ Both datasets are subsets of larger knowledge graphs with inverse relations remo
 ### RGCN Encoder
 - Relational Graph Convolutional Network with basis decomposition
 - 2-layer architecture with configurable hidden dimensions
-- Dropout for regularization
+- Dropout for regularization (can be enabled at inference for MC Dropout)
+- Support for basis decomposition to reduce parameters
 - Xavier initialization with optional custom initialization schemes
 
 ### Decoders
 
 **DistMult**: 
-- Bilinear scoring function
+- Bilinear scoring function: `score(h, r, t) = h^T diag(r) t`
 - Simple and effective for symmetric relations
+- Optional L2 regularization
 
 **TransE**: 
-- Translation-based scoring
+- Translation-based scoring: `score(h, r, t) = -||h + r - t||`
 - Effective for hierarchical relations
+
+Both decoders support optional calibration layers for improved confidence estimates.
+
+### Uncertainty Methods
+
+**Monte Carlo Dropout**:
+- Enable dropout during inference
+- Perform multiple stochastic forward passes (default: 5)
+- Compute mean and variance of predictions
+- Epistemic uncertainty estimation
+
+**Deep Ensemble**:
+- Train N independent models (default: 5)
+- Different random initializations for diversity
+- Aggregate predictions via mean and variance
+- Captures both epistemic and aleatoric uncertainty
+
+### Calibration Methods
+
+Applied post-training to improve probability estimates:
+
+**Temperature Scaling**:
+- Single scalar parameter to rescale logits
+- Preserves ranking while improving calibration
+- Variants: Standard and MC-Dropout aware
+
+**Isotonic Regression**:
+- Non-parametric calibration
+- Learns monotonic mapping from scores to probabilities
+- Requires validation data
+
+**Platt Scaling**:
+- Learns input-dependent temperature
+- Neural network-based approach
+- More flexible than temperature scaling
 
 ## Evaluation Metrics
 
-The project implements two types of evaluation:
+The project implements comprehensive evaluation across multiple dimensions:
 
 ### Link Prediction Metrics
-- **MRR (Mean Reciprocal Rank)**: Average of reciprocal ranks
+- **MRR (Mean Reciprocal Rank)**: Average of reciprocal ranks of correct entities
+- **Mean Rank**: Average rank of correct entities
 - **Hits@K**: Percentage of correct entities in top K predictions
   - Hits@1, Hits@3, Hits@10
 
-### Classification Metrics
-- **AUC (Area Under ROC Curve)**: Binary classification performance
-- **Evaluation Loss**: Cross-entropy loss on validation set
+### Calibration Metrics
+- **ECE (Expected Calibration Error)**: Measures calibration quality using binning
+- **ACE (Adaptive Calibration Error)**: Adaptive binning version of ECE
+- **Brier Score**: Mean squared difference between predicted probabilities and true labels
+- **Reliability Diagrams**: Visual calibration assessment
 
-## Known Issues
+### Uncertainty Metrics
+- **Predictive Variance**: Variance of predictions across MC samples or ensemble members
+- **Epistemic Uncertainty**: Captured via MC Dropout or ensemble disagreement
+- **Calibration Curves**: Relationship between predicted confidence and actual accuracy
 
-**Current Challenge**: The model achieves good AUC scores but shows poor performance on link prediction metrics (MRR, Hits@K). This discrepancy suggests:
-- The model performs well at binary classification (edge exists vs. not)
-- But struggles with ranking correct entities among all candidates
-- Potential issues with negative sampling strategy or training pipeline calibration
+## Known Issues and Limitations
+
+**Link Prediction Performance**: While the model achieves good calibration metrics, there is ongoing work to improve link prediction metrics (MRR, Hits@K). This discrepancy suggests:
+- The model performs well at probability calibration
+- But there's room for improvement in entity ranking
+- Ongoing investigation into negative sampling strategies and training dynamics
+
+**Computational Cost**: Deep Ensemble and MC Dropout require multiple forward passes, increasing inference time proportionally to the number of samples/models.
 
 ## Future Work
 
-The following features and improvements are planned:
+The following enhancements are planned:
 
-- [ ] **Investigate and resolve link prediction issues**
-  - Analyze ranking behavior
-  - Experiment with different negative sampling strategies
-  - Tune hyperparameters for better ranking performance
+- [ ] **Performance Improvements**:
+  - Further optimize link prediction metrics
+  - Experiment with alternative negative sampling strategies
+  - Hyperparameter tuning for better ranking performance
 
-- [ ] **Implement Uncertainty Estimation Methods**:
-  - [ ] **Monte Carlo Dropout**: Use dropout at inference time to estimate epistemic uncertainty
-  - [ ] **Deep Ensembles**: Train multiple models with different initializations to quantify prediction uncertainty
+- [ ] **Additional Uncertainty Methods**:
+  - Evidential deep learning
+  - Bayesian neural networks
+  - Test-time augmentation
 
-- [ ] **Additional Evaluation**:
-  - Calibration metrics (ECE, MCE)
-  - Uncertainty quality metrics
-  - Out-of-distribution detection
+- [ ] **Evaluation Extensions**:
+  - Out-of-distribution detection experiments
+  - Uncertainty-aware metrics
+  - Selective prediction based on uncertainty
+  - Adversarial robustness evaluation
+
+- [ ] **Scalability**:
+  - Multi-GPU training for large ensembles
+  - Efficient uncertainty estimation for large graphs
+  - Incremental learning support
 
 
 ## Checkpoints
@@ -252,18 +413,27 @@ Logs are written to:
 
 ## Contributing
 
-This is thesis work in active development. Suggestions and discussions are welcome via emails.
+This is active research work. Suggestions, discussions, and contributions are welcome via issues and pull requests.
 
 ## License
 
-See [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) file for details.
 
 
 ## References
 
-- [Modeling Relational Data with Graph Convolutional Networks](https://arxiv.org/abs/1703.06103) (RGCN)
-- [Embedding Entities and Relations for Learning and Inference in Knowledge Bases](https://arxiv.org/abs/1412.6575) (DistMult)
-- [Translating Embeddings for Modeling Multi-relational Data](https://papers.nips.cc/paper/5071-translating-embeddings-for-modeling-multi-relational-data) (TransE)
+### Knowledge Graph Embedding Models
+- [Modeling Relational Data with Graph Convolutional Networks](https://arxiv.org/abs/1703.06103) - Schlichtkrull et al., 2018 (RGCN)
+- [Embedding Entities and Relations for Learning and Inference in Knowledge Bases](https://arxiv.org/abs/1412.6575) - Yang et al., 2015 (DistMult)
+- [Translating Embeddings for Modeling Multi-relational Data](https://papers.nips.cc/paper/5071-translating-embeddings-for-modeling-multi-relational-data) - Bordes et al., 2013 (TransE)
+
+### Uncertainty Estimation
+- [Dropout as a Bayesian Approximation: Representing Model Uncertainty in Deep Learning](https://arxiv.org/abs/1506.02142) - Gal & Ghahramani, 2016
+- [Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles](https://arxiv.org/abs/1612.01474) - Lakshminarayanan et al., 2017
+
+### Calibration
+- [On Calibration of Modern Neural Networks](https://arxiv.org/abs/1706.04599) - Guo et al., 2017 (Temperature Scaling)
+- [Obtaining Well Calibrated Probabilities Using Bayesian Binning](https://people.cs.pitt.edu/~milos/research/AAAI_Calibration.pdf) - Naeini et al., 2015
 
 ## Contact
 
