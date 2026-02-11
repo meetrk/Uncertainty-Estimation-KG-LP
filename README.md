@@ -1,6 +1,6 @@
 # Uncertainty Estimation for Knowledge Graph Link Prediction
 
-A PyTorch-based implementation for link prediction on knowledge graphs with uncertainty estimation and calibration methods. This project implements robust uncertainty quantification techniques for knowledge graph completion tasks, including Monte Carlo Dropout, Deep Ensembles, and post-hoc calibration.
+A PyTorch-based implementation for link prediction on knowledge graphs with uncertainty estimation and calibration methods. This project implements robust uncertainty quantification techniques for knowledge graph completion tasks, including Monte Carlo Dropout, Deep Ensembles, and post hoc calibration.
 
 ## Overview
 
@@ -247,7 +247,7 @@ The training pipeline supports both single model and ensemble training:
    - Monte Carlo Dropout: Multiple stochastic forward passes
    - Predictive variance computation
 6. **Calibration** (optional):
-   - Post-hoc calibration using validation set
+   - Post hoc calibration using validation set
    - Temperature Scaling, Isotonic Regression, or Platt Scaling
 7. **Logging**: 
    - Console logging with configurable verbosity
