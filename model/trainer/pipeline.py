@@ -5,7 +5,7 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from model.trainer.basepipeline import BasePipeline
 from utils.utils import negative_sampling
-from utils.evaluation import compute_mrr, compute_mrr_mc_dropout,create_filter_dicts,compute_uncertainty
+from utils.evaluation import compute_mrr,compute_uncertainty
 from utils.utils import dropout_edges
 from model.trainer.basepipeline import BasePipeline
 from model.calibrator.tempscaling import TemperatureMCDropout, TemperatureScaling
@@ -134,7 +134,7 @@ class Pipeline(BasePipeline):
             valid_edge_index=self.data.test_edge_index,
             valid_edge_type=self.data.test_edge_type,
             mc_samples=uncertainty_samples)
-        self.test_uncertainty(
+        uncertainty_scores= self.test_uncertainty(
             model=self.model,
             test_edge_index=self.data.test_edge_index,
             test_edge_type=self.data.test_edge_type,
@@ -157,7 +157,7 @@ class Pipeline(BasePipeline):
             mc_samples=uncertainty_samples,
             calibration_model=calibration_model
             )
-            self.test_uncertainty(
+            uncertainty_scores = self.test_uncertainty(
             model=self.model,
             test_edge_index=self.data.test_edge_index,
             test_edge_type=self.data.test_edge_type,
@@ -170,7 +170,7 @@ class Pipeline(BasePipeline):
 
         if save:
             self.save_checkpoint(self.epoch, name=f'calibrated_{Path(checkpoint_path).name}')
-        
+        return uncertainty_scores
 
     def train(self):
         """
@@ -275,7 +275,8 @@ class Pipeline(BasePipeline):
             pos_logits=pos,
             neg_logits=neg,
             lr=lr,
-            max_iters=max_iters
+            max_iters=max_iters,
+            lambda_mrl=self.config.get_section('calibration')['lambda']
         )
         return platt_model
 
@@ -297,9 +298,9 @@ class Pipeline(BasePipeline):
     
 
         if type_params['type'] == 'mc_dropout':
-            calibrator = TemperatureMCDropout(init_temp=1.0).cuda()
+            calibrator = TemperatureMCDropout(init_temp=1.0)
         else:
-            calibrator = TemperatureScaling(init_temp=1.0).cuda()  
+            calibrator = TemperatureScaling(init_temp=1.0)
 
         inference_params = {**type_params, 'return_logits': True}
         pos,neg = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, inference_params)
@@ -312,7 +313,8 @@ class Pipeline(BasePipeline):
             pos_logits=pos,
             neg_logits=neg,
             lr=lr,
-            max_iters=max_iters
+            max_iters=max_iters,
+            lambda_mrl=self.config.get_section('calibration')['lambda']
         )
 
         return calibrator
@@ -330,7 +332,7 @@ class Pipeline(BasePipeline):
         self.logger.info("Starting Isotonic Regression Calibration")
 
         with torch.no_grad():
-            type_params = {**type_params, 'num_negatives': 10}
+            type_params = {**type_params, 'num_negatives': 1}
             out, labels = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, type_params)     
         
         probab = torch.sigmoid(out)
