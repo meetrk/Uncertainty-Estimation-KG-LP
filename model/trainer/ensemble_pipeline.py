@@ -449,8 +449,8 @@ class EnsemblePipeline(BasePipeline):
         
         Returns uncertainty metrics: Brier score, ECE, etc.
         """
-        params = {**params, 'num_negatives': 1}
-        y_out, y_true = self.inference(model,test_edge_index, test_edge_type, params)
+        params = {**params, 'num_negatives': 1, 'return_logits': False}
+        y_out, y_true, y_variance = self.inference(model,test_edge_index, test_edge_type, params)
         y_true = y_true.detach().cpu().numpy()
 
         if 'calibration_model' in params and isinstance(params['calibration_model'], IsotonicCalibrator):
@@ -460,20 +460,26 @@ class EnsemblePipeline(BasePipeline):
             y_prob_calib = calibrator.predict(y_out)
             self.logger.info("Uncertainty scores after calibration:")
             uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
+            print(f"Variance of positives and negatives: {y_variance}")
         elif 'calibration_model' in params and isinstance(params['calibration_model'], PlattScalingEnsemble):
             calibrator = params['calibration_model'].eval()
             y_prob_calib = calibrator(y_out).detach().cpu().numpy()
             self.logger.info("Applied Platt Scaling with Ensemble calibration")
             uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
+            print(f"Variance of positives and negatives: {y_variance}")
+
         elif 'calibration_model' in params and isinstance(params['calibration_model'], TemperatureEnsemble):
             calibrator = params['calibration_model'].eval()
             y_out_calib = calibrator(y_out.detach()).detach().cpu().numpy()
             print("Applied Scalar Temperature Scaling calibration")
             uncertainty_scores = compute_uncertainty(y_true, y_out_calib)
+            print(f"Variance of positives and negatives: {y_variance}")
         else:
             y_prob = torch.sigmoid(y_out.detach()).cpu().numpy()
             # print(f"Calibrated probabilities (first 10): {y_prob[:10]}\n Uncalibrated probabilities (first 10): {y_out.detach().cpu().numpy()[:10]}")
             uncertainty_scores = compute_uncertainty(y_true, y_prob)
+            print(f"Variance of positives and negatives: {y_variance}")
+
 
 
         for metric, value in uncertainty_scores.items():
@@ -504,8 +510,10 @@ class EnsemblePipeline(BasePipeline):
             return positives, negatives 
         
         out = torch.cat([torch.stack(positives, dim=0).mean(dim=0), torch.stack(negatives, dim=0).mean(dim=0)], dim=0)  # Shape: (num_samples, num_models)
+        variance = torch.stack(positives, dim=0).var(dim=0).mean(), torch.stack(negatives, dim=0).var(dim=0).mean()  # Variance across ensemble members for positives and negatives
+
         gt = torch.cat([torch.full_like(eval_edge_type, 1), torch.full_like(neg_edge_type, 0)])
 
-        return out, gt
+        return out, gt, variance
             
 

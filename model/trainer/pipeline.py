@@ -364,7 +364,9 @@ class Pipeline(BasePipeline):
             if params.get('return_logits', False): 
                 return positives, negatives
             out = torch.cat([torch.stack(positives, dim=1), torch.stack(negatives, dim=1)], dim=0) # Shape: (num_samples, mc_samples)
+            variance = torch.stack(positives, dim=1).var(dim=1).mean(), torch.stack(negatives, dim=1).var(dim=1).mean()
             gt = torch.cat([torch.full_like(pos_out, 1), torch.full_like(neg_out, 0)])
+            return out, gt, variance
         else:
             z = model.encode(self.data.edge_index, self.data.edge_type)
             pos_out = model.decode(z, eval_edge_index, eval_edge_type)
@@ -379,7 +381,7 @@ class Pipeline(BasePipeline):
     def test_uncertainty(self, model,test_edge_index, test_edge_type, params):
 
         params = {**params, 'num_negatives': 1}
-        y_out, y_true = self.inference(model,test_edge_index, test_edge_type, params)
+        y_out, y_true,y_variance = self.inference(model,test_edge_index, test_edge_type, params)
         y_true = y_true.detach().cpu().numpy()
 
         if 'calibration_model' in params and isinstance(params['calibration_model'], IsotonicCalibrator):
@@ -419,6 +421,7 @@ class Pipeline(BasePipeline):
                 y_prob = torch.sigmoid(y_out.detach()).cpu().numpy()
                 y_prob = y_prob.mean(axis=1)
                 uncertainty_scores = compute_uncertainty(y_true, y_prob)
+                print("Variance of MC Dropout predictions (positives):", y_variance)
 
 
         for metric, value in uncertainty_scores.items():
