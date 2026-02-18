@@ -262,7 +262,7 @@ class Pipeline(BasePipeline):
 
         self.logger.info(f"Calibration method: {self.config.get_section('calibration')['method']}")
         if type_params['type'] == 'mc_dropout':
-            platt_model = PlattScalingMCDropout(mc_samples=type_params['mc_samples']).cuda()
+            platt_model = PlattScalingMCDropout(mc_samples=type_params['mc_samples'])
         else:
             platt_model = PlattScaling()
 
