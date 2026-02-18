@@ -1,0 +1,37 @@
+\begin{table*}[t]
+\centering
+\small
+\caption{Calibration Performance Comparison: Ranking and Probability Metrics (\textbf{Bold} = Best per Metric per Dataset)}
+\label{tab:calibration_comparison}
+\begin{tabular}{ll l rrrrrr}
+\toprule
+\textbf{Dataset} & \textbf{Model} & \textbf{Method} & MRR ($\uparrow$) & H@1 ($\uparrow$) & H@10 ($\uparrow$) & ECE ($\downarrow$) & Brier ($\downarrow$) & ACE ($\downarrow$) \\
+\midrule
+\multirow{9}{*}{FB15k-237} & \multirow{3}{*}{Standard} & Temp Scaling & 0.2551 & 0.1640 & 0.4433 & 0.2148 $\pm$ 0.0005 & 0.1619 $\pm$ 0.0002 & 0.2473 $\pm$ 0.0019 \\
+ &  & Platt Scaling & 0.2411 & 0.1519 & 0.4261 & 0.0377 $\pm$ 0.0012 & 0.0766 $\pm$ 0.0007 & 0.0677 $\pm$ 0.0031 \\
+ &  & Isotonic & 0.2023 & 0.1011 & 0.3818 & 0.0048 $\pm$ 0.0007 & 0.0733 $\pm$ 0.0008 & \textbf{0.0158 $\pm$ 0.0032} \\
+\cmidrule(lr){2-9}
+ & \multirow{3}{*}{MC Dropout} & Temp Scaling & 0.2523 & 0.1614 & 0.4409 & 0.2136 $\pm$ 0.0006 & 0.1617 $\pm$ 0.0003 & 0.2485 $\pm$ 0.0019 \\
+ &  & Platt Scaling & 0.2533 & 0.1623 & 0.4413 & 0.0316 $\pm$ 0.0010 & 0.0737 $\pm$ 0.0006 & 0.0570 $\pm$ 0.0029 \\
+ &  & Isotonic & 0.2007 & 0.1009 & 0.3773 & \textbf{0.0041 $\pm$ 0.0007} & 0.0673 $\pm$ 0.0008 & 0.0160 $\pm$ 0.0023 \\
+\cmidrule(lr){2-9}
+ & \multirow{3}{*}{Deep Ensemble} & Temp Scaling & 0.2864 & \textbf{0.1877} & \textbf{0.4897} & 0.1844 $\pm$ 0.0003 & 0.1312 $\pm$ 0.0002 & 0.2774 $\pm$ 0.0012 \\
+ &  & Platt Scaling & \textbf{0.2864} & \textbf{0.1877} & \textbf{0.4897} & 0.0231 $\pm$ 0.0007 & 0.0583 $\pm$ 0.0005 & 0.0574 $\pm$ 0.0023 \\
+ &  & Isotonic & 0.2342 & 0.1221 & 0.4303 & 0.0042 $\pm$ 0.0006 & \textbf{0.0567 $\pm$ 0.0006} & 0.0224 $\pm$ 0.0040 \\
+\cmidrule(lr){2-9}
+\midrule
+\multirow{9}{*}{WN18RR} & \multirow{3}{*}{Standard} & Temp Scaling & 0.4386 & 0.3998 & 0.5123 & 0.1815 $\pm$ 0.0018 & 0.1806 $\pm$ 0.0002 & 0.3172 $\pm$ 0.0115 \\
+ &  & Platt Scaling & 0.4291 & 0.3903 & 0.5007 & 0.0317 $\pm$ 0.0028 & 0.1117 $\pm$ 0.0008 & 0.0468 $\pm$ 0.0042 \\
+ &  & Isotonic & 0.3713 & 0.3155 & 0.4543 & 0.0130 $\pm$ 0.0035 & 0.1104 $\pm$ 0.0012 & 0.0431 $\pm$ 0.0112 \\
+\cmidrule(lr){2-9}
+ & \multirow{3}{*}{MC Dropout} & Temp Scaling & 0.4351 & 0.3953 & 0.5099 & 0.1754 $\pm$ 0.0019 & 0.1783 $\pm$ 0.0002 & 0.2977 $\pm$ 0.0037 \\
+ &  & Platt Scaling & 0.4350 & 0.3950 & 0.5099 & 0.0296 $\pm$ 0.0026 & 0.1076 $\pm$ 0.0011 & 0.0473 $\pm$ 0.0055 \\
+ &  & Isotonic & 0.2554 & 0.1150 & 0.4798 & 0.0159 $\pm$ 0.0025 & 0.1064 $\pm$ 0.0007 & 0.0544 $\pm$ 0.0208 \\
+\cmidrule(lr){2-9}
+ & \multirow{3}{*}{Deep Ensemble} & Temp Scaling & \textbf{0.4559} & \textbf{0.4097} & 0.5391 & 0.2047 $\pm$ 0.0007 & 0.1752 $\pm$ 0.0001 & 0.3972 $\pm$ 0.0019 \\
+ &  & Platt Scaling & 0.4502 & 0.3907 & \textbf{0.5392} & 0.0134 $\pm$ 0.0015 & 0.0846 $\pm$ 0.0008 & 0.0552 $\pm$ 0.0091 \\
+ &  & Isotonic & 0.3638 & 0.2502 & 0.4821 & \textbf{0.0120 $\pm$ 0.0015} & \textbf{0.0837 $\pm$ 0.0008} & \textbf{0.0308 $\pm$ 0.0071} \\
+\cmidrule(lr){2-9}
+\bottomrule
+\end{tabular}
+\end{table*}

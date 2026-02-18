@@ -333,7 +333,10 @@ class Pipeline(BasePipeline):
 
         with torch.no_grad():
             type_params = {**type_params, 'num_negatives': 1}
-            out, labels = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, type_params)     
+            if type_params['type'] == "mc_dropout":
+                out, labels,_ = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, type_params)     
+            else:
+                out, labels = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, type_params)     
         
         probab = torch.sigmoid(out)
         probab = probab.cpu().numpy()
@@ -383,7 +386,10 @@ class Pipeline(BasePipeline):
     def test_uncertainty(self, model,test_edge_index, test_edge_type, params):
 
         params = {**params, 'num_negatives': 1}
-        y_out, y_true,y_variance = self.inference(model,test_edge_index, test_edge_type, params)
+        if params['type'] == 'mc_dropout':
+            y_out, y_true,y_variance = self.inference(model,test_edge_index, test_edge_type, params)
+        else:
+            y_out, y_true = self.inference(model,test_edge_index, test_edge_type, params)
         y_true = y_true.detach().cpu().numpy()
 
         if 'calibration_model' in params and isinstance(params['calibration_model'], IsotonicCalibrator):

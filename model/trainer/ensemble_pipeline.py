@@ -428,14 +428,12 @@ class EnsemblePipeline(BasePipeline):
         # Get ensemble predictions (raw logits) and labels
         model.eval()
         with torch.no_grad():
-            out, labels = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, {'return_logits': False, 'num_negatives': 10})    
+            out, labels, _ = self.inference(model, self.data.valid_edge_index, self.data.valid_edge_type, {'return_logits': False, 'num_negatives': 1})    
 
         probab = torch.sigmoid(out)
         probab = probab.cpu().numpy()
         labels = labels.cpu().numpy()
 
-        print(f"Uncalibrated probabilities (first 10): {probab[:10]}")
-        print(f"True labels (first 10): {labels[:10]}")
         iso_reg = IsotonicCalibrator(out_of_bounds='clip')
         iso_reg.fit(probab, labels)
 

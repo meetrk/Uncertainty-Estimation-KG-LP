@@ -110,7 +110,6 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
                 probs = torch.sigmoid(probs)
                 probs = calibration_model.predict(probs.detach().cpu().numpy())
                 probs = torch.from_numpy(probs).float()
-                print("Applied Isotonic Regression ")
             else:
                 probs = torch.sigmoid(calibration_model(probs))
         ranks.append(compute_rank(probs))
@@ -139,7 +138,6 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
                 probs = torch.sigmoid(probs)
                 probs = calibration_model.predict(probs.detach().cpu().numpy())
                 probs = torch.from_numpy(probs).float()
-                print("Applied Isotonic Regression ")
 
             else:
                 probs = torch.sigmoid(calibration_model(probs))
