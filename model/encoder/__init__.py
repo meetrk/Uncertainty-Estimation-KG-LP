@@ -1,6 +1,6 @@
 """
 Encoder models and layers for knowledge graph embeddings.
 """
-from .layer import RGCNLayer
+from .model import RGCN
 
-__all__ = ['RGCNLayer']
+__all__ = ['RGCN']

@@ -5,7 +5,6 @@ from pathlib import Path
 from utils.config_loader import ConfigLoader
 from model.encoder.model import RGCN
 from model.decoder.distmult import DistMult
-from model.decoder.transe import TransE
 from model.trainer.pipeline import Pipeline
 import os.path as osp
 from misc.rel_link_pred_dataset import RelLinkPredDataset

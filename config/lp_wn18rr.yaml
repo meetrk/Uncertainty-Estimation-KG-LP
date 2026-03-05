@@ -23,8 +23,8 @@ ensemble:
 training:
   epochs: 10000
   sampling:
-    negative_sampling_ratio: 3
-    edge_dropout: 0.2
+    negative_sampling_ratio: 1
+    edge_dropout: 0
   optimiser:
     learning_rate: 0.01
     weight_decay: 0
@@ -33,15 +33,15 @@ training:
     enabled: true
     patience: 10
     delta: 0.001
-  load_model: true
-  save_model: true
+  load_model: false
+  save_model: false
   checkpoint_path: ./new_models/experiment_1/WN18RR_checkpoint_label_0.9_negative_sampling_3_edge_dropout_0.2_epoch_1700.pth
-  test: true
+  test: false
   label_smoothing: 
     positive: 0.9
     negative: 0.05
 calibration:
-  enabled: true
+  enabled: false
   type: standard
   mc_samples: 5
   method: isotonic_regression
