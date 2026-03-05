@@ -1,6 +1,8 @@
 """
 Evaluation metrics and utilities for knowledge graph link prediction.
 """
+from random import random
+
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -159,9 +161,14 @@ def compute_mrr_ensemble(train_edge_index, train_edge_type, edge_index, edge_typ
     return scores
 
 @torch.no_grad()
-def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_type, data, model, mc_samples,calibration_model=None):
+def compute_mrr_mc_dropout(train_edge_index, train_edge_type,
+                            edge_index, edge_type,
+                            data, model, mc_samples,
+                            calibration_model=None):
 
-    # OPTIMIZATION: Encode graph once per model and cache
+    device = train_edge_index.device  # respect whatever device data lives on
+
+    # Encode mc_samples times with dropout active
     all_z = []
     model.encoder.mc_dropout = True
     for _ in range(mc_samples):
@@ -171,11 +178,12 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
 
     ranks = []
     variance_true = []
+
     for i in tqdm(range(edge_type.numel()), desc="Computing MRR"):
         (src, dst), rel = edge_index[:, i], edge_type[i]
 
-        # Try all nodes as tails, but delete true triplets:
-        tail_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+        # ── TAIL PREDICTION ──────────────────────────────────────────────────
+        tail_mask = torch.ones(data.num_nodes, dtype=torch.bool, device=device)
         for (heads, tails), types in [
             (data.train_edge_index, data.train_edge_type),
             (data.valid_edge_index, data.valid_edge_type),
@@ -183,38 +191,32 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         ]:
             tail_mask[tails[(heads == src) & (types == rel)]] = False
 
-        tail = torch.arange(data.num_nodes)[tail_mask]
-        tail = torch.cat([torch.tensor([dst]), tail])
-        head = torch.full_like(tail, fill_value=src)
+        tail = torch.arange(data.num_nodes, device=device)[tail_mask]
+        tail = torch.cat([dst.unsqueeze(0), tail])          # stays on device
+        head = torch.full_like(tail, fill_value=src.item()) # stays on device
         eval_edge_index = torch.stack([head, tail], dim=0)
-        eval_edge_type = torch.full_like(tail, fill_value=rel)
+        eval_edge_type  = torch.full_like(tail, fill_value=rel.item())
 
-        # Use cached encodings for prediction
-        predictions = []
-        for model_idx in range(mc_samples):
-            pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
-            predictions.append(pred)
-        
+        predictions = [model.decode(all_z[k], eval_edge_index, eval_edge_type)
+                       for k in range(mc_samples)]
+
         if calibration_model is not None:
-            stacked = torch.stack(predictions, dim=1)   # Shape: [num_candidates, MC_SAMPLES]
+            stacked = torch.stack(predictions, dim=1)  # [num_candidates, mc_samples]
             if isinstance(calibration_model, IsotonicCalibrator):
-                probs = calibration_model.predict(torch.sigmoid(stacked).mean(dim=1).detach().cpu().numpy())
-                probs = torch.from_numpy(probs).float()
+                probs = calibration_model.predict(
+                    torch.sigmoid(stacked).mean(dim=1).cpu().numpy())
+                probs = torch.from_numpy(probs).float().to(device)
             else:
                 probs = calibration_model(stacked)
-
         else:
-            stacked = torch.stack(predictions, dim=0)  
-            probs = torch.sigmoid(stacked).mean(dim=0)  
-
+            stacked = torch.stack(predictions, dim=0)  # [mc_samples, num_candidates]
+            probs   = torch.sigmoid(stacked).mean(dim=0)
 
         ranks.append(compute_rank(probs))
-        
-        variance = torch.stack(predictions, dim=0).var(dim=0)  # [MC_SAMPLES, N] → var per candidate
-        variance_true.append(variance[0].item())
+        variance_true.append(torch.stack(predictions, dim=0).var(dim=0)[0].item())
 
-        # Try all nodes as heads, but delete true triplets:
-        head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+        # ── HEAD PREDICTION ──────────────────────────────────────────────────
+        head_mask = torch.ones(data.num_nodes, dtype=torch.bool, device=device)
         for (heads, tails), types in [
             (data.train_edge_index, data.train_edge_type),
             (data.valid_edge_index, data.valid_edge_type),
@@ -222,42 +224,38 @@ def compute_mrr_mc_dropout(train_edge_index, train_edge_type, edge_index, edge_t
         ]:
             head_mask[heads[(tails == dst) & (types == rel)]] = False
 
-        head = torch.arange(data.num_nodes)[head_mask]
-        head = torch.cat([torch.tensor([src]), head])
-        tail = torch.full_like(head, fill_value=dst)
+        head = torch.arange(data.num_nodes, device=device)[head_mask]
+        head = torch.cat([src.unsqueeze(0), head])
+        tail = torch.full_like(head, fill_value=dst.item())
         eval_edge_index = torch.stack([head, tail], dim=0)
-        eval_edge_type = torch.full_like(head, fill_value=rel)
+        eval_edge_type  = torch.full_like(head, fill_value=rel.item())
 
-        # Use cached encodings for prediction
-        predictions = []
-        for model_idx in range(mc_samples):
-            pred = model.decode(all_z[model_idx], eval_edge_index, eval_edge_type)
-            predictions.append(pred)
+        predictions = [model.decode(all_z[k], eval_edge_index, eval_edge_type)
+                       for k in range(mc_samples)]
 
         if calibration_model is not None:
-            stacked = torch.stack(predictions, dim=1)   # Shape: [num_candidates, MC_SAMPLES]
+            stacked = torch.stack(predictions, dim=1)
             if isinstance(calibration_model, IsotonicCalibrator):
-                probs = calibration_model.predict(torch.sigmoid(stacked).mean(dim=1).detach().cpu().numpy())
-                probs = torch.from_numpy(probs).float()
+                probs = calibration_model.predict(
+                    torch.sigmoid(stacked).mean(dim=1).cpu().numpy())
+                probs = torch.from_numpy(probs).float().to(device)
             else:
                 probs = calibration_model(stacked)
         else:
-            stacked = torch.stack(predictions, dim=0)   
-            probs = torch.sigmoid(stacked).mean(dim=0)  
+            stacked = torch.stack(predictions, dim=0)
+            probs   = torch.sigmoid(stacked).mean(dim=0)
 
-        variance = torch.stack(predictions, dim=0).var(dim=0)
-        ranks.append(compute_rank(probs))   
+        ranks.append(compute_rank(probs))
 
-
-    scores = {
-        'mrr': (1. / torch.tensor(ranks, dtype=torch.float)).mean(),
-        'mean_rank': torch.tensor(ranks, dtype=torch.float).mean(),
-        'hits@1': (torch.tensor(ranks, dtype=torch.float) <= 1).float().mean(),
-        'hits@3': (torch.tensor(ranks, dtype=torch.float) <= 3).float().mean(),
-        'hits@10': (torch.tensor(ranks, dtype=torch.float) <= 10).float().mean(),
+    ranks_tensor = torch.tensor(ranks, dtype=torch.float)
+    return {
+        'mrr':       (1. / ranks_tensor).mean().item(),
+        'mean_rank': ranks_tensor.mean().item(),
+        'hits@1':    (ranks_tensor <= 1).float().mean().item(),
+        'hits@3':    (ranks_tensor <= 3).float().mean().item(),
+        'hits@10':   (ranks_tensor <= 10).float().mean().item(),
     }
 
-    return scores
 
 def compute_uncertainty(y_true, y_probs):
     """
@@ -307,7 +305,7 @@ def compute_mrr(edge_index, edge_type, data, model, return_probs= False, negativ
     model.eval()
     z = model.encode(data.edge_index, data.edge_type)
     ranks = []
-    
+    diffs = []
     # For calibration
     ranks = []
     for i in tqdm(range(edge_type.numel())):
@@ -337,6 +335,10 @@ def compute_mrr(edge_index, edge_type, data, model, return_probs= False, negativ
                 probs = torch.sigmoid(calibration_model(out))
         else:
             probs = torch.sigmoid(out)
+
+        first_probs, first_indices = probs.topk(2)
+        diff = first_probs[0] - first_probs[1]
+        diffs.append(diff.item())
         ranks.append(compute_rank(probs))
 
 
@@ -361,17 +363,23 @@ def compute_mrr(edge_index, edge_type, data, model, return_probs= False, negativ
             if isinstance(calibration_model, IsotonicCalibrator):
                 probs = calibration_model.predict(torch.sigmoid(out).detach().cpu().numpy())
                 probs = torch.from_numpy(probs).float()
-
+                
             else:
                 probs = torch.sigmoid(calibration_model(out))
         else:
             probs = torch.sigmoid(out)
+
+        first_probs, first_indices = probs.topk(2)
+        diff = first_probs[0] - first_probs[1]
+        diffs.append(diff.item())
+
         ranks.append(compute_rank(probs))
 
 
 
     ranks_tensor = torch.tensor(ranks, dtype=torch.float)
-    
+
+    print_stats(diffs,"(Diff between Top-2 Probabilities)")
     scores = {
         'mrr': (1. / ranks_tensor).mean().item(),
         'mean_rank': ranks_tensor.mean().item(),
@@ -385,20 +393,24 @@ def compute_mrr(edge_index, edge_type, data, model, return_probs= False, negativ
 
 def print_stats(probab,addtional=""):
 
-    print(f"Average Confidence of Top-1 Predictions: {np.mean(probab)}")
-    print(f"Max Confidence of Top-1 Predictions: {np.max(probab)}")
-    print(f"Min Confidence of Top-1 Predictions: {np.min(probab)}")
-    print(f"Std Dev of Confidence of Top-1 Predictions: {np.std(probab)}")
-
+    if len(probab) == 0:
+        print("No probabilities to analyze.")
+        return
+    print(f"Average Confidence of Difference: {np.mean(probab)}")
+    print(f"Median Confidence of Difference: {np.median(probab)}")
+    print(f"Count of Zero Differences: {(np.array(probab) == 0).sum()}")
+    print(f"Max Difference: {np.max(probab)}")
+    print(f"Min Difference: {np.min(probab)}")
+    print(f"Total Samples: {len(probab)}")
 
     # Plot histogram of confidence scores
     plt.figure(figsize=(10, 6))
-    plt.hist(probab, bins=10, edgecolor='black', alpha=0.7)
+    plt.hist(probab, bins=50, edgecolor='black', alpha=0.7)
     plt.xlabel('Confidence Score')
     plt.ylabel('Frequency')
-    plt.title(f'Distribution of Top-1 Prediction Confidence {addtional}')
+    plt.title(f'Distribution of Diffrences in top two probabilities')
     plt.grid(True, alpha=0.3)
-    filename = './plots/confidence_histogram{}.png'.format(np.random.randint(10000))
+    filename = f'difference_top2_confidence_histogram{np.random.randint(0, 1000)}.png'
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Histogram saved as '{filename}'")

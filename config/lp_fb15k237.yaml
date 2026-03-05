@@ -42,8 +42,9 @@ training:
     negative: 0.05
 calibration:
   enabled: true
-  type: mc_dropout
+  type: standard
   mc_samples: 5
-  method: platt_scaling
+  method: isotonic_regression
   max_iters: 1000
   learning_rate: 0.01
+  lambda: 0.5

@@ -1,4 +1,3 @@
-import numpy
 from tqdm import tqdm
 from pathlib import Path
 from tqdm import tqdm
@@ -149,6 +148,7 @@ class Pipeline(BasePipeline):
                 max_iters=self.config.get_section('calibration').get('max_iters', 50),
                 lr=self.config.get_section('calibration').get('learning_rate', 0.01)
             )
+            print(f"Calibration model: {calibration_model}")
             scores = self.test_link_pred(
             type=type,
             model=self.model,
@@ -399,6 +399,8 @@ class Pipeline(BasePipeline):
                 y_prob_calib = calibrator.predict(y_out.mean(axis=1))
             else:
                 y_prob_calib = calibrator.predict(y_out)
+
+            self.print_isotonic_calibration(y_out, y_prob_calib)
             self.logger.info("Uncertainty scores after calibration:")
             uncertainty_scores = compute_uncertainty(y_true, y_prob_calib)
         elif 'calibration_model' in params and isinstance(params['calibration_model'], TemperatureScaling):
@@ -439,3 +441,28 @@ class Pipeline(BasePipeline):
                 self.logger.info(f"{metric}: {value}")
         
         return uncertainty_scores
+    
+
+    def print_isotonic_calibration(self,raw_scores,isotonic_calibrated_scores):
+
+        import matplotlib.pyplot as plt
+        # Before calibration
+        plt.hist(raw_scores, bins=50, alpha=0.5, label='Before calibration')
+        # After isotonic regression calibration
+        plt.hist(isotonic_calibrated_scores, bins=50, alpha=0.5, label='After isotonic regression')
+        plt.xlabel('Confidence Score')
+        plt.ylabel('Frequency')
+        plt.legend()
+        plt.show()
+        plt.savefig('isotonic_calibration_histogram.png')
+        import numpy as np
+        unique_before = len(np.unique(raw_scores))
+        unique_after_iso = len(np.unique(isotonic_calibrated_scores))
+
+        print(f"Unique scores before: {unique_before}")
+        print(f"Unique scores after isotonic: {unique_after_iso}")
+        from scipy.stats import spearmanr
+
+        rho_iso, _ = spearmanr(raw_scores, isotonic_calibrated_scores)
+        print(f"Spearman rank correlation (isotonic): {rho_iso:.4f}")
+

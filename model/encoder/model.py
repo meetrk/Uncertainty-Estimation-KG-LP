@@ -1,4 +1,3 @@
-from model.encoder.layer import RGCNLayer
 from torch import nn
 import torch.nn.functional as F
 import torch
@@ -34,12 +33,7 @@ class RGCN(nn.Module):
         self.entity_embedding = nn.Parameter(torch.FloatTensor(num_nodes, self.embedding_dim))
         self.entity_embedding_bias = nn.Parameter(torch.zeros(1, self.embedding_dim))
         self.bn1 = nn.BatchNorm1d(self.hidden_layer_size)  
-        
-        # RGCN layers
-        # self.conv1 = RGCNLayer(
-        #     self.embedding_dim, self.hidden_layer_size, self.num_relations, num_bases=self.num_bases)
-        # self.conv2 = RGCNLayer(
-        #     self.hidden_layer_size, self.embedding_dim, self.num_relations, num_bases=self.num_bases)
+
         if self.bases_enabled:
             self.conv1 = RGCNConv(self.embedding_dim, self.hidden_layer_size, self.num_relations,
                                 num_bases=5)

@@ -1,5 +1,3 @@
-from unicodedata import name
-from xml.parsers.expat import model
 import torch
 from pathlib import Path
 
@@ -10,7 +8,7 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from utils.utils import negative_sampling, dropout_edges
 from model.calibrator.tempscaling import TemperatureEnsemble
-from model.calibrator.plattscaling import PlattScalingEnsemble, PlattScalingMCDropout
+from model.calibrator.plattscaling import PlattScalingEnsemble
 from model.calibrator.isotonic import IsotonicCalibrator
 from utils.evaluation import compute_uncertainty,compute_mrr_ensemble
 

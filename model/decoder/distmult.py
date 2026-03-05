@@ -1,9 +1,6 @@
 import torch
 from torch import Tensor
-
 from model.decoder.kgemodel import KGEModel
-import torch.nn.functional as F
-from utils.utils import negative_sampling
 
 
 

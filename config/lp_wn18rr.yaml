@@ -42,7 +42,7 @@ training:
     negative: 0.05
 calibration:
   enabled: true
-  type: mc_dropout
+  type: standard
   mc_samples: 5
   method: isotonic_regression
   max_iters: 1000
